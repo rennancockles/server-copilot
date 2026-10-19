@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -105,3 +106,36 @@ def test_health_endpoint() -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_server_advertises_its_icon() -> None:
+    icons = create_server().icons
+
+    assert icons is not None
+    assert len(icons) == 1
+    assert icons[0].mime_type == "image/png"
+    assert icons[0].sizes == ["128x128"]
+    prefix = "data:image/png;base64,"
+    assert icons[0].src.startswith(prefix)
+    assert base64.b64decode(icons[0].src[len(prefix) :]).startswith(b"\x89PNG")
+
+
+def test_initialize_response_includes_icon() -> None:
+    app = create_server().streamable_http_app(host=Settings().host)
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp",
+            headers={"Accept": "application/json, text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "0"},
+                },
+            },
+        )
+
+    assert "data:image/png;base64," in response.text
