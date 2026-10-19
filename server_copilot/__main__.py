@@ -1,10 +1,24 @@
+import logging
+import sys
+
+import uvicorn
+
+from server_copilot.app import create_app
+from server_copilot.auth import AuthConfigError
 from server_copilot.config import get_settings
-from server_copilot.server import create_server
 
 
 def main() -> None:
     settings = get_settings()
-    create_server().run("streamable-http", host=settings.host, port=settings.port)
+    try:
+        app = create_app(settings)
+    except AuthConfigError as exc:
+        sys.exit(f"Configuration error: {exc}")
+    if settings.auth_disabled:
+        logging.getLogger("uvicorn.error").warning(
+            "Authentication is DISABLED: anyone who can reach this port can use every tool."
+        )
+    uvicorn.run(app, host=settings.host, port=settings.port)
 
 
 if __name__ == "__main__":

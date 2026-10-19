@@ -1155,6 +1155,7 @@ dependencies = [
     { name = "mcp" },
     { name = "psutil" },
     { name = "pydantic-settings" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -1175,6 +1176,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "psutil", specifier = ">=6" },
     { name = "pydantic-settings", specifier = ">=2.5" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [package.metadata.requires-dev]

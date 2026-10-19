@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from mcp.server.mcpserver import MCPServer
+import uvicorn
 from mcp.types import CallToolResult, TextContent
 from starlette.testclient import TestClient
 
@@ -75,15 +75,28 @@ def test_get_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert get_settings().host == "127.0.0.1"
 
 
-def test_main_runs_streamable_http(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_serves_app_with_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SERVER_COPILOT_HOST", "127.0.0.1")
     monkeypatch.setenv("SERVER_COPILOT_PORT", "9001")
+    monkeypatch.setenv("SERVER_COPILOT_AUTH_DISABLED", "true")
     run = MagicMock()
-    monkeypatch.setattr(MCPServer, "run", run)
+    monkeypatch.setattr(uvicorn, "run", run)
 
     main()
 
-    run.assert_called_once_with("streamable-http", host="127.0.0.1", port=9001)
+    run.assert_called_once()
+    assert run.call_args.kwargs == {"host": "127.0.0.1", "port": 9001}
+
+
+def test_main_exits_when_token_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SERVER_COPILOT_AUTH_TOKEN", raising=False)
+    run = MagicMock()
+    monkeypatch.setattr(uvicorn, "run", run)
+
+    with pytest.raises(SystemExit, match="SERVER_COPILOT_AUTH_TOKEN"):
+        main()
+
+    run.assert_not_called()
 
 
 def test_health_endpoint() -> None:

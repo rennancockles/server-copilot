@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +9,8 @@ class Settings(BaseSettings):
     port: int = 8000
     docker_host: str = "tcp://docker-socket-proxy:2375"
     host_disks: str = ""
+    auth_token: SecretStr | None = None
+    auth_disabled: bool = False
 
 
 def get_settings() -> Settings:

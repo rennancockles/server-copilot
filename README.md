@@ -2,6 +2,36 @@
 
 MCP server to inspect and manage a home server (Docker containers, logs, metrics).
 
+## Authentication
+
+The MCP endpoint (`/mcp`) requires `Authorization: Bearer <token>` and answers `401` otherwise.
+Only `/health` is public, so the container healthcheck keeps working.
+
+Generate a token and put it in `.env` (never commit it):
+
+```
+echo "SERVER_COPILOT_AUTH_TOKEN=$(openssl rand -hex 32)" >> .env
+```
+
+- The server refuses to start without a token (minimum 32 characters), and `docker compose up`
+  fails if `SERVER_COPILOT_AUTH_TOKEN` is unset.
+- For local development only, `SERVER_COPILOT_AUTH_DISABLED=true` turns authentication off and
+  logs a warning at startup. Do not set it in compose.
+- The token is compared in constant time, is not part of the settings `repr`, and is never logged;
+  rejected requests log only the method, path and client address.
+- The token travels in a header, so keep the tunnel on HTTPS (cloudflared already terminates TLS).
+  Rotate it by changing `.env` and running `docker compose up -d`.
+
+Connecting clients:
+
+```
+claude mcp add --transport http server-copilot https://<your-tunnel-host>/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+In MCP Inspector, choose Streamable HTTP, enter the URL and add the same header under
+Authentication.
+
 ## Host metrics
 
 `get_host_metrics` reports CPU %, load average, memory, swap and uptime of the host. These come
