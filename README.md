@@ -2,6 +2,24 @@
 
 MCP server to inspect and manage a home server (Docker containers, logs, metrics).
 
+## Host metrics
+
+`get_host_metrics` reports CPU %, load average, memory, swap and uptime of the host. These come
+from `/proc`, which inside a Linux container already shows host values, so nothing needs to be
+mounted for them. Disk usage is reported only for the filesystems you choose: bind-mount each one
+read-only and list it in `SERVER_COPILOT_HOST_DISKS` as `name=/container/path`, comma separated:
+
+```yaml
+environment:
+  SERVER_COPILOT_HOST_DISKS: root=/host/root,data=/host/data
+volumes:
+  - /:/host/root:ro
+  - /mnt/data:/host/data:ro
+```
+
+Only the filesystem's free/used numbers are read; the server exposes no file access. Mount a
+specific path (for example `/mnt/data`) rather than `/` if you want the smallest possible footprint.
+
 ## docker-socket-proxy permissions
 
 server-copilot never touches `docker.sock`; it talks to the Docker API through

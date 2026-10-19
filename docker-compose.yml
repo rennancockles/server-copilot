@@ -10,6 +10,13 @@ services:
     environment:
       SERVER_COPILOT_PORT: ${SERVER_COPILOT_PORT:-8000}
       SERVER_COPILOT_DOCKER_HOST: ${SERVER_COPILOT_DOCKER_HOST:-tcp://docker-socket-proxy:2375}
+      SERVER_COPILOT_HOST_DISKS: ${SERVER_COPILOT_HOST_DISKS:-}
+    # Host disks: bind-mount each filesystem to monitor read-only and list it in
+    # SERVER_COPILOT_HOST_DISKS (name=/container/path,...), e.g.:
+    #   SERVER_COPILOT_HOST_DISKS=root=/host/root,data=/host/data
+    # volumes:
+    #   - /:/host/root:ro
+    #   - /mnt/data:/host/data:ro
     networks:
       - server-copilot-net
     read_only: true

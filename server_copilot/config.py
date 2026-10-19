@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     docker_host: str = "tcp://docker-socket-proxy:2375"
+    host_disks: str = ""
 
 
 def get_settings() -> Settings:
