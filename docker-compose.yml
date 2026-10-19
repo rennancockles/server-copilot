@@ -1,7 +1,6 @@
 services:
   server-copilot:
-    build: .
-    image: server-copilot:latest
+    image: ghcr.io/rennancockles/server-copilot:${SERVER_COPILOT_VERSION:-latest}
     container_name: server-copilot
     restart: unless-stopped
     env_file:
