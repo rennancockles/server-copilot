@@ -6,7 +6,6 @@
         test test_cov test-unit test-ci \
         security-scan \
         release-dry release \
-        publish-docs docs \
         env-check clean
 
 .DEFAULT_GOAL := help
@@ -164,3 +163,15 @@ clean: ## Remove build artifacts and caches
 	@find . -type f -name '*.pyc' -not -path './.loom/*' -delete
 	@rm -rf htmlcov coverage.xml test-results.xml .coverage
 	@printf "$(GREEN)✓ Clean$(RESET)\n"
+
+
+##################
+# Custom Targets #
+##################
+
+mcp-inspector: SHELL := /bin/zsh
+mcp-inspector: ## Launch the MCP Inspector UI (point it at the running server's HTTP endpoint)
+	@echo "$(YELLOW)Launching MCP Inspector (needs Node/npx)...$(RESET)"
+	@echo "$(YELLOW)Start the server first with 'make mcp-run', then connect the Inspector$(RESET)"
+	@npx @modelcontextprotocol/inspector --web --catalog .mcp.json
+

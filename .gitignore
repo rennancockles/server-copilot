@@ -34,3 +34,4 @@ scratchwork.py
 .python-version
 *.local.*
 ISSUES.md
+docker-compose-sock.yml

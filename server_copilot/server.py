@@ -9,6 +9,7 @@ from server_copilot.config import get_settings
 from server_copilot.containers import register_container_tools
 from server_copilot.docker import DockerClient
 from server_copilot.logs import register_log_tools
+from server_copilot.stats import register_stats_tools
 
 
 def create_server(docker: DockerClient | None = None) -> MCPServer:
@@ -34,5 +35,6 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
 
     register_container_tools(mcp, client)
     register_log_tools(mcp, client)
+    register_stats_tools(mcp, client)
 
     return mcp
