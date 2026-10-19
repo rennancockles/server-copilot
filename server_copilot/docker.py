@@ -1,4 +1,6 @@
 import re
+from collections.abc import Generator
+from contextlib import contextmanager
 from http import HTTPStatus
 from types import TracebackType
 from typing import Any, Self
@@ -97,9 +99,10 @@ class DockerClient:
     async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return (await self._get(path, params)).json()
 
-    async def _get(self, path: str, params: dict[str, Any] | None) -> httpx2.Response:
+    @contextmanager
+    def _transport_errors(self, path: str) -> Generator[None]:
         try:
-            response = await self._client.get(path, params=params)
+            yield
         except httpx2.TimeoutException as exc:
             raise DockerUnavailableError(
                 f"Timed out talking to Docker at {self.base_url} (GET {path})."
@@ -109,9 +112,29 @@ class DockerClient:
                 f"Cannot connect to Docker at {self.base_url}: {exc}. "
                 "Check that docker-socket-proxy is running and reachable on server-copilot-net."
             ) from exc
+
+    async def _get(self, path: str, params: dict[str, Any] | None) -> httpx2.Response:
+        with self._transport_errors(path):
+            response = await self._client.get(path, params=params)
         if response.is_success:
             return response
         raise self._error_for(response, path)
+
+    async def get_bytes(
+        self, path: str, params: dict[str, Any] | None = None, *, max_bytes: int
+    ) -> tuple[bytes, bool]:
+        """Read a response body, stopping after max_bytes. Returns (data, was_cut_short)."""
+        with self._transport_errors(path):
+            async with self._client.stream("GET", path, params=params) as response:
+                if not response.is_success:
+                    await response.aread()
+                    raise self._error_for(response, path)
+                buffer = bytearray()
+                async for chunk in response.aiter_bytes():
+                    buffer += chunk
+                    if len(buffer) > max_bytes:
+                        return bytes(buffer[:max_bytes]), True
+        return bytes(buffer), False
 
     def _error_for(self, response: httpx2.Response, path: str) -> DockerError:
         status = response.status_code

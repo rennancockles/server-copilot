@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse, Response
 from server_copilot.config import get_settings
 from server_copilot.containers import register_container_tools
 from server_copilot.docker import DockerClient
+from server_copilot.logs import register_log_tools
 
 
 def create_server(docker: DockerClient | None = None) -> MCPServer:
@@ -23,7 +24,7 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
     mcp = MCPServer("server-copilot", lifespan=lifespan)
 
     @mcp.custom_route("/health", methods=["GET"])
-    async def health(request: Request) -> Response:
+    async def health(_: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
     @mcp.tool()
@@ -32,5 +33,6 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
         return "ok"
 
     register_container_tools(mcp, client)
+    register_log_tools(mcp, client)
 
     return mcp
