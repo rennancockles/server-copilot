@@ -22,6 +22,7 @@ dev = [
     "mypy>=2.3",
     "ty>=0.0.75",
     "pytest>=9.1",
+    "python-semantic-release>=10.5,<11",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
@@ -103,6 +104,7 @@ fail_under = 75
 
 [tool.semantic_release]
 allow_zero_version = true
+build_command = "uv lock --upgrade-package server-copilot && git add uv.lock"
 commit_message = "chore(release): bumping to version {version}"
 tag_format = "{version}"
 version_toml = [
