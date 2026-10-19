@@ -1,0 +1,125 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "server-copilot"
+version = "0.1.0"
+description = "MCP server to inspect and manage a home server (Docker containers, logs, metrics)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.3,<3",
+    "pydantic-settings>=2.5",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16",
+    "mypy>=2.3",
+    "ty>=0.0.75",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-rerunfailures>=16.6",
+    "pytest-xdist>=3.8.0",
+]
+
+[project.scripts]
+server-copilot = "server_copilot.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server_copilot"]
+
+
+[tool.ruff]
+src = ["server_copilot", "tests"]
+line-length = 100
+output-format = "concise"
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = [
+  "C",  # McCabe complexity
+  "E",  # pycodestyle
+  "W",  # pycodestyle warnings
+  "F",  # Pyflakes
+  "I",  # isort
+  "UP",  # pyupgrade
+  "PL",  # Pylint
+  "B",  # flake8-bugbear
+  "ASYNC",  # flake8-async
+  "SIM",  # flake8-simplify
+  "N",  # pep8-naming
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+  "PLR2004",  # Magic value used in comparison
+  "SIM300",  # Yoda conditions are discouraged
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["server_copilot", "tests"]
+extra-standard-library = ["typing_extensions"]
+combine-as-imports = true
+force-wrap-aliases = true
+
+
+[tool.mypy]
+packages = ["server_copilot"]
+python_version = "3.12"
+cache_fine_grained = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+
+[tool.pytest.ini_options]
+addopts = "-rfEs --strict-config --strict-markers -n auto --no-header"
+asyncio_mode = "auto"
+testpaths = [
+  "tests",
+]
+markers = [
+  "unit: mark a test as a unit test",
+  "integration: mark a test as an integration test"
+]
+
+
+[tool.coverage.run]
+source = ["server_copilot"]
+
+[tool.coverage.report]
+fail_under = 75
+
+
+[tool.semantic_release]
+allow_zero_version = true
+commit_message = "chore(release): bumping to version {version}"
+tag_format = "{version}"
+version_toml = [
+  "pyproject.toml:project.version",
+]
+version_variables = [
+  "server_copilot/__init__.py:__version__"
+]
+
+[tool.semantic_release.changelog]
+exclude_commit_patterns = ["chore(release): bumping to version .*"]
+
+[tool.semantic_release.branches.main]
+match = "(main)"
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+default_bump_level = 0
+
+[tool.semantic_release.remote]
+type = "github"

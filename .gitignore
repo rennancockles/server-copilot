@@ -1,0 +1,36 @@
+# Environment and IDE
+.venv/
+.env
+.vscode/
+.claude/
+.cursor/
+.codex/
+.mcp.json
+
+# Cache
+.mypy_cache
+.pytest_cache
+.ruff_cache
+
+# Build and Compiled
+dist/
+_build/
+site/
+*.pyc
+.DS_Store
+
+# Test Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# KanbAI
+.kanbai
+
+# Local work
+tmp/
+scratchworks/
+scratchwork.py
+.python-version
+*.local.*
+ISSUES.md
