@@ -77,7 +77,7 @@ class DockerClient:
     ) -> None:
         self.base_url = base_url(docker_host)
         self._client = httpx2.AsyncClient(
-            base_url=self.base_url, timeout=timeout, transport=transport
+            base_url=self.base_url, timeout=timeout, transport=transport, trust_env=False
         )
 
     async def __aenter__(self) -> Self:

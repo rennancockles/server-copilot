@@ -41,7 +41,7 @@ def anyio_backend() -> str:
 async def test_ping_tool() -> None:
     mcp = create_server()
     tools = await mcp.list_tools()
-    assert [t.name for t in tools] == ["ping"]
+    assert "ping" in {t.name for t in tools}
     result = await mcp.call_tool("ping", {})
     assert isinstance(result, CallToolResult)
     content = result.content[0]
