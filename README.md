@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Server Copilot" width="280">
+  <img src="assets/logo.png" alt="Server Copilot" width="400">
 </p>
 
 # server-copilot
