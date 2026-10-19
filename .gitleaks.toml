@@ -1,0 +1,10 @@
+title = "server-copilot gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "KanbAI JWT"
+paths = [
+  '''.kanbai/config.toml''',
+]

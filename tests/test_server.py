@@ -10,6 +10,8 @@ from server_copilot.__main__ import main
 from server_copilot.config import Settings, get_settings
 from server_copilot.server import create_server
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,3 +84,11 @@ def test_main_runs_streamable_http(monkeypatch: pytest.MonkeyPatch) -> None:
     main()
 
     run.assert_called_once_with("streamable-http", host="127.0.0.1", port=9001)
+
+
+def test_health_endpoint() -> None:
+    app = create_server().streamable_http_app(host=Settings().host)
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

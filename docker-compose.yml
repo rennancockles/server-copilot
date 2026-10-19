@@ -1,0 +1,25 @@
+services:
+  server-copilot:
+    build: .
+    image: server-copilot:latest
+    container_name: server-copilot
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SERVER_COPILOT_PORT: ${SERVER_COPILOT_PORT:-8000}
+      SERVER_COPILOT_DOCKER_HOST: ${SERVER_COPILOT_DOCKER_HOST:-tcp://docker-socket-proxy:2375}
+    networks:
+      - server-copilot-net
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  server-copilot-net:
+    external: true

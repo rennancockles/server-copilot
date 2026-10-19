@@ -1,0 +1,15 @@
+.git
+.venv
+.env
+.kanbai
+.claude
+__pycache__
+*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+tests
+.env.*
+example.env
