@@ -11,6 +11,8 @@ services:
       SERVER_COPILOT_DOCKER_HOST: ${SERVER_COPILOT_DOCKER_HOST:-tcp://docker-socket-proxy:2375}
       SERVER_COPILOT_HOST_DISKS: ${SERVER_COPILOT_HOST_DISKS:-}
       SERVER_COPILOT_AUTH_TOKEN: ${SERVER_COPILOT_AUTH_TOKEN:?set SERVER_COPILOT_AUTH_TOKEN in .env (openssl rand -hex 32)}
+    # To scan a home directory with get_disk_usage, also run as the host user (mode 750 homes):
+    #   user: "1000:1000"
     # Host disks: bind-mount each filesystem to monitor read-only and list it in
     # SERVER_COPILOT_HOST_DISKS (name=/container/path,...), e.g.:
     #   SERVER_COPILOT_HOST_DISKS=root=/host/root,data=/host/data

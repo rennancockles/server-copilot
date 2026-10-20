@@ -20,6 +20,7 @@ through `docker.sock` directly.
 | `get_container_stats`     | CPU %, memory, network and block I/O of one container.                            |
 | `get_containers_overview` | Usage of every running container, sorted, with totals.                            |
 | `get_host_metrics`        | Host CPU, load, memory, swap, uptime and disk usage per configured mount.         |
+| `get_disk_usage`          | Largest files and directories inside a configured disk, with sizes.               |
 | `recent_events`           | Docker events (start, die, oom, restart, health) in a time window.                |
 | `find_problem_containers` | Unhealthy, restart-looping, OOM-killed, dead or crashed containers.               |
 
@@ -153,8 +154,41 @@ volumes:
   - /mnt/data:/host/data:ro
 ```
 
-Only free/used numbers are read; the server exposes no file access. Mount a specific path (for
-example `/mnt/data`) instead of `/` for the smallest footprint.
+`get_host_metrics` only reads free/used numbers. `get_disk_usage` (next section) also lists names
+and sizes. Mount a specific path (for example `/mnt/data`) instead of `/` for the smallest footprint.
+
+## Disk usage
+
+`get_disk_usage(disk, path, ...)` answers "what is eating my disk": the largest files and
+directories under a path, largest first, with their share of the total. The disks are the ones you
+already list in `SERVER_COPILOT_HOST_DISKS`, and `path` is relative to the disk root, so the mounts
+you choose are the only scope the tool has. To look inside a home directory:
+
+```yaml
+environment:
+  SERVER_COPILOT_HOST_DISKS: home=/host/home
+user: "1000:1000" # the host user, so a mode 750 home is readable
+volumes:
+  - /home/youruser:/host/home:ro
+```
+
+Then ask for `disk="home"` and drill down with the `path` of a large directory from the answer
+(`Containers/plex`, ...). `max_depth` (up to 4) controls how many levels are reported.
+
+What it does and does not do:
+
+- It reports names and sizes, never file contents, and it only runs `du`. The mount is read-only.
+- Symlinks are not followed, and a `path` that resolves outside the disk is refused.
+- Other filesystems mounted below the path (an external drive) are skipped unless
+  `cross_filesystems` is true, so they do not appear in the list by default.
+- One scan runs at a time, at low priority, and stops after `timeout_seconds` (20 by default, 60 at
+  most), returning what had finished and saying so.
+- Entries it cannot read are counted and mentioned, not hidden.
+
+Mounting a whole home directory lets the container read everything the host user can, including
+`.ssh`. The tool never opens those files, but a flaw in the server would be able to. If that worries
+you, mount only the directories you want analysed, each as its own disk (for example your data and
+media folders).
 
 ## Connecting clients
 
