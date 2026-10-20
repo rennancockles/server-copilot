@@ -110,7 +110,7 @@ class DockerClient:
         except httpx2.TransportError as exc:
             raise DockerUnavailableError(
                 f"Cannot connect to Docker at {self.base_url}: {exc}. "
-                "Check that docker-socket-proxy is running and reachable on server-copilot-net."
+                "Check that docker-socket-proxy is running and reachable on docker-api."
             ) from exc
 
     async def _get(self, path: str, params: dict[str, Any] | None) -> httpx2.Response:

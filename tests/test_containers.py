@@ -93,7 +93,7 @@ INSPECT_PAYLOAD: dict[str, Any] = {
             "9000/tcp": None,
         },
         "Networks": {
-            "server-copilot-net": {
+            "docker-api": {
                 "IPAddress": "172.20.0.5",
                 "Gateway": "172.20.0.1",
                 "Aliases": ["app"],
@@ -188,7 +188,7 @@ async def test_inspect_container_extracts_details_and_masks_secrets() -> None:
     assert details.health.failing_streak == 3
     assert details.health.last_output == "curl: (7) connection refused"
     assert details.ports == ["0.0.0.0:8000->8000/tcp", "[::]:8000->8000/tcp", "9000/tcp"]
-    assert [n.name for n in details.networks] == ["server-copilot-net", "none-net"]
+    assert [n.name for n in details.networks] == ["docker-api", "none-net"]
     assert details.networks[0].ip_address == "172.20.0.5"
     assert details.networks[1].ip_address is None
     assert [(m.type, m.source, m.read_only) for m in details.mounts] == [

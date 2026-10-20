@@ -32,12 +32,14 @@ content is returned as-is**, so anyone holding the access token can read what yo
 You need Docker with Compose on the server, and a way to reach the service (for example a
 cloudflared tunnel).
 
-**1. Create the network and the docker-socket-proxy** (skip if you already have them). The proxy
-is the only thing that touches the Docker socket; enable just what the server reads and keep
-`POST=0`:
+**1. Create the networks and the docker-socket-proxy** (skip what you already have). Two external
+networks keep the pieces apart: `docker-api` joins the proxy and the services allowed to talk to
+Docker, and `edge` joins the tunnel and the services it exposes. The proxy is the only thing that
+touches the Docker socket; enable just what the server reads and keep `POST=0`:
 
 ```
-docker network create server-copilot-net
+docker network create docker-api
+docker network create edge
 ```
 
 ```yaml
@@ -49,18 +51,16 @@ services:
     restart: unless-stopped
     environment:
       CONTAINERS: 1 # list/inspect, logs, stats
-      INFO: 1
-      SYSTEM: 1
       EVENTS: 1 # recent_events
       VERSION: 1
       POST: 0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
-      - server-copilot-net
+      - docker-api
 
 networks:
-  server-copilot-net:
+  docker-api:
     external: true
 ```
 
@@ -87,9 +87,20 @@ The compose file runs the image published to GitHub Container Registry
 `SERVER_COPILOT_VERSION=0.1.0` in `.env` to pin a release. If the package is private, log in first
 (see _CI and releases_).
 
-**4. Expose it** by pointing your cloudflared tunnel at `http://server-copilot:8000`
-(the container joins `server-copilot-net`; add the tunnel to that network or to a network shared
-with it). Keep the tunnel on HTTPS, because the token travels in a header.
+**4. Expose it** through your cloudflared tunnel. Add the cloudflared container to the `edge`
+network (keep the network it already uses) and add a public hostname to the tunnel that points to
+`http://server-copilot:8000`:
+
+```yaml
+cloudflared:
+  networks: [default, edge]
+networks:
+  edge:
+    external: true
+```
+
+Never put cloudflared on `docker-api`: an internet-facing container must not be able to reach the
+Docker API. Keep the tunnel on HTTPS, because the token travels in a header.
 
 **5. Connect a client** (see below).
 

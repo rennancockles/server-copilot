@@ -18,7 +18,8 @@ services:
     #   - /:/host/root:ro
     #   - /mnt/data:/host/data:ro
     networks:
-      - server-copilot-net
+      - docker-api
+      - edge
     read_only: true
     tmpfs:
       - /tmp
@@ -28,5 +29,7 @@ services:
       - no-new-privileges:true
 
 networks:
-  server-copilot-net:
+  docker-api:
+    external: true
+  edge:
     external: true
