@@ -13,6 +13,7 @@ from server_copilot.containers import register_container_tools
 from server_copilot.diagnostics import register_diagnostic_tools
 from server_copilot.disk_usage import register_disk_tools
 from server_copilot.docker import DockerClient
+from server_copilot.files import register_file_tools
 from server_copilot.host import parse_disks, register_host_tools
 from server_copilot.logs import register_log_tools
 from server_copilot.stats import register_stats_tools
@@ -52,6 +53,7 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
     disks = parse_disks(settings.host_disks)
     register_host_tools(mcp, disks)
     register_disk_tools(mcp, disks)
+    register_file_tools(mcp, disks)
     register_diagnostic_tools(mcp, client)
 
     return mcp

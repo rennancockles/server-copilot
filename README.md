@@ -21,6 +21,7 @@ through `docker.sock` directly.
 | `get_containers_overview` | Usage of every running container, sorted, with totals.                            |
 | `get_host_metrics`        | Host CPU, load, memory, swap, uptime and disk usage per configured mount.         |
 | `get_disk_usage`          | Largest files and directories inside a configured disk, with sizes.               |
+| `list_files`              | Names, types, sizes and dates in one directory of a configured disk (no contents). |
 | `recent_events`           | Docker events (start, die, oom, restart, health) in a time window.                |
 | `find_problem_containers` | Unhealthy, restart-looping, OOM-killed, dead or crashed containers.               |
 
@@ -189,6 +190,23 @@ Mounting a whole home directory lets the container read everything the host user
 `.ssh`. The tool never opens those files, but a flaw in the server would be able to. If that worries
 you, mount only the directories you want analysed, each as its own disk (for example your data and
 media folders).
+
+### Listing files
+
+`list_files(disk, path, ...)` lists one directory of a configured disk, like `ls`: name, type (file,
+directory, symlink or other), size (files only), modification time and whether the server can read
+it. It uses the same disks and the same path rules as `get_disk_usage`.
+
+- It returns names, types, sizes and dates only. It never reads file contents, and symlinks are
+  listed as symlinks, without their target, and never followed.
+- Names starting with `.` are left out, and a hidden directory cannot be entered by name or through
+  a symlink, unless `include_hidden` is true. Credentials usually live there (`.ssh`, `.env`,
+  `.aws`). This is a safe default, not a lock: whoever holds the token can set `include_hidden`.
+  `get_disk_usage` does not apply this rule and can still show those names.
+- `sort` is `name`, `size` (largest first) or `modified` (newest first). `limit` (up to 500) and
+  `offset` page through large directories. A directory with more than 20,000 entries, or one that
+  takes more than 10 seconds to read, is only partly read, and the answer says so.
+- A directory's own size is not shown; use `get_disk_usage` for that.
 
 ## Connecting clients
 
