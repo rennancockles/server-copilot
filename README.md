@@ -113,6 +113,7 @@ environment or from `.env`:
 | ------------------------------ | --------------------------------- | -------------------------------------------------------- |
 | `SERVER_COPILOT_AUTH_TOKEN`    | _(required)_                      | Bearer token for `/mcp`, at least 32 characters.         |
 | `SERVER_COPILOT_AUTH_DISABLED` | `false`                           | Turn authentication off. Local development only.         |
+| `SERVER_COPILOT_URL_TOKEN`     | _(empty)_                         | Optional secret for `/mcp/<token>` (ChatGPT). See below. |
 | `SERVER_COPILOT_HOST`          | `0.0.0.0`                         | Interface to bind. Keep it in the container.             |
 | `SERVER_COPILOT_PORT`          | `8000`                            | Port inside the container.                               |
 | `SERVER_COPILOT_DOCKER_HOST`   | `tcp://docker-socket-proxy:2375`  | docker-socket-proxy endpoint (`tcp://host:port`).        |
@@ -131,6 +132,11 @@ public, so the container healthcheck keeps working.
   rejected requests log only the method, path and client address.
 - Rotate it by editing `.env` and your client configuration, then `docker compose up -d`. Do it
   whenever the token may have been exposed (pasted in a chat, screenshot, lost laptop).
+- `SERVER_COPILOT_URL_TOKEN` (optional) opens a second door for clients that cannot send a header:
+  `POST /mcp/<token>` serves the same tools. It is a separate secret, so you can rotate or remove it
+  without touching the bearer token, and the bearer token never appears in a URL. Any other
+  `/mcp/...` path answers `404`; only `POST` is accepted. Use only letters, digits, `-` and `_`
+  (at least 32 characters, different from the bearer token).
 
 ## Host metrics
 
@@ -179,6 +185,19 @@ clients report as an OAuth error such as `auth() returned AUTHORIZED without aut
 **Claude Desktop** and other clients that only accept local (stdio) servers can use the
 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge with the same URL and header.
 Claude.ai custom connectors expect OAuth, which this server does not implement.
+
+**ChatGPT:** its connectors only offer OAuth or no authentication, so use the secret URL. Generate
+a token (`openssl rand -hex 32`), set it as `SERVER_COPILOT_URL_TOKEN`, restart, and in ChatGPT
+(_Settings, Connectors, Developer mode_) create a connector with the URL
+`https://<your-host>/mcp/<url-token>` and authentication set to _None_ (menu names are ChatGPT's and
+change). Treat that URL like a password:
+
+- The server runs uvicorn without its access log, because request lines would print the secret, and
+  its own rejection log shows `/mcp/<redacted>`. Cloudflare still records request URLs in its
+  security events, and ChatGPT stores the URL in the connector.
+- All tools are read-only, but they include container logs and host metrics. To revoke access,
+  change or unset `SERVER_COPILOT_URL_TOKEN` and restart; the old URL answers `404` at once.
+- The server answers statelessly with JSON, which is what ChatGPT connectors expect.
 
 **MCP Inspector:** run `npx @modelcontextprotocol/inspector`, choose _Streamable HTTP_, enter the
 URL and add the `Authorization` header.

@@ -86,7 +86,7 @@ def test_main_serves_app_with_uvicorn(monkeypatch: pytest.MonkeyPatch) -> None:
     main()
 
     run.assert_called_once()
-    assert run.call_args.kwargs == {"host": "127.0.0.1", "port": 9001}
+    assert run.call_args.kwargs == {"host": "127.0.0.1", "port": 9001, "access_log": False}
 
 
 def test_main_exits_when_token_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:

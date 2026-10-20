@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     docker_host: str = "tcp://docker-socket-proxy:2375"
     host_disks: str = ""
     auth_token: SecretStr | None = None
+    url_token: SecretStr | None = None
     auth_disabled: bool = False
 
 
