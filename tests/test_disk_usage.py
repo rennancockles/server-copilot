@@ -269,11 +269,12 @@ async def test_real_du_ranks_directories_and_does_not_follow_symlinks(
     (outside / "huge").write_bytes(b"x" * 1024 * KIB)
     (home / "link").symlink_to(outside)
 
-    report = await measure_disk_usage({"home": str(home)}, "home", limit=4)
+    report = await measure_disk_usage({"home": str(home)}, "home", limit=20)
 
     names = [e.path for e in report.entries]
     assert names[:3] == ["a", "c.bin", "b"]
-    link = next(e for e in report.entries if e.path == "link")
+    link = next((e for e in report.entries if e.path == "link"), None)
+    assert link is not None, [e.path for e in report.entries]
     assert link.kind == "file"
     assert link.size_bytes < 8 * KIB
     assert report.total_bytes is not None
