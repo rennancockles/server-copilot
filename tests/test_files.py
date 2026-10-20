@@ -122,7 +122,7 @@ def test_hidden_entries_are_listed_on_request(home: Path) -> None:
 
 @pytest.mark.parametrize("path", [".ssh", "docs/.cache", ".ssh/"])
 def test_hidden_directories_cannot_be_entered_by_name(home: Path, path: str) -> None:
-    with pytest.raises(FileListingError, match="hidden directory"):
+    with pytest.raises(DiskUsageError, match="hidden directory"):
         listing(home, path)
 
 
@@ -136,7 +136,7 @@ def test_hidden_directories_can_be_entered_on_request(home: Path) -> None:
 def test_a_symlink_to_a_hidden_directory_does_not_bypass_the_rule(home: Path) -> None:
     (home / "shortcut").symlink_to(home / ".ssh")
 
-    with pytest.raises(FileListingError, match="hidden directory"):
+    with pytest.raises(DiskUsageError, match="hidden directory"):
         listing(home, "shortcut")
 
 

@@ -185,6 +185,10 @@ What it does and does not do:
 - One scan runs at a time, at low priority, and stops after `timeout_seconds` (20 by default, 60 at
   most), returning what had finished and saying so.
 - Entries it cannot read are counted and mentioned, not hidden.
+- Names starting with `.` are left out of the list, and a hidden directory cannot be entered,
+  unless `include_hidden` is true. Their size still counts in the totals (`.cache` is often the
+  largest consumer), so the visible entries can add up to less than the total, and a note says
+  how many were left out.
 
 Mounting a whole home directory lets the container read everything the host user can, including
 `.ssh`. The tool never opens those files, but a flaw in the server would be able to. If that worries
@@ -202,7 +206,7 @@ it. It uses the same disks and the same path rules as `get_disk_usage`.
 - Names starting with `.` are left out, and a hidden directory cannot be entered by name or through
   a symlink, unless `include_hidden` is true. Credentials usually live there (`.ssh`, `.env`,
   `.aws`). This is a safe default, not a lock: whoever holds the token can set `include_hidden`.
-  `get_disk_usage` does not apply this rule and can still show those names.
+  `get_disk_usage` follows the same rule.
 - `sort` is `name`, `size` (largest first) or `modified` (newest first). `limit` (up to 500) and
   `offset` page through large directories. A directory with more than 20,000 entries, or one that
   takes more than 10 seconds to read, is only partly read, and the answer says so.

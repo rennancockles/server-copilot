@@ -297,11 +297,13 @@ async def test_tool_is_registered_with_bounded_arguments(
         "limit",
         "include_files",
         "cross_filesystems",
+        "include_hidden",
         "timeout_seconds",
     }
     assert all(prop.get("description") for prop in properties.values())
     assert "data, home" in properties["disk"]["description"]
     assert properties["max_depth"]["maximum"] == disk_usage.MAX_DEPTH
+    assert properties["include_hidden"]["default"] is False
     assert properties["limit"]["maximum"] == disk_usage.MAX_LIMIT
     assert properties["timeout_seconds"]["maximum"] == disk_usage.MAX_TIMEOUT
     assert tool.input_schema["required"] == ["disk"]
@@ -322,6 +324,7 @@ async def test_tool_returns_a_structured_report(
     assert result.structured_content is not None
     assert result.structured_content["entries"][0]["path"] == "Containers"
     assert result.structured_content["total_bytes"] == 700
+    assert result.structured_content["hidden_omitted"] == 0
 
 
 async def test_tool_surfaces_errors_as_tool_errors(
@@ -394,3 +397,71 @@ async def test_failure_with_no_output_reports_the_exit_code(
 
     with pytest.raises(DiskUsageError, match="exit code 3"):
         await measure_disk_usage({"home": str(home)}, "home")
+
+
+async def test_hidden_entries_are_left_out_of_the_list_but_not_the_totals(
+    home: Path, fake_du: Callable[..., Path]
+) -> None:
+    (home / ".ssh").mkdir()
+    fake_du(
+        stdout=(
+            line(900, home / ".ssh")
+            + line(600, home / "Containers")
+            + line(500, home / "Containers" / ".cache")
+            + line(2000, home)
+        )
+    )
+
+    report = await measure_disk_usage({"home": str(home)}, "home", max_depth=2)
+
+    assert [e.path for e in report.entries] == ["Containers"]
+    assert report.hidden_omitted == 2
+    assert report.total_bytes == 2000
+    assert any("still counts in the totals" in note for note in report.notes)
+
+
+async def test_include_hidden_lists_everything(home: Path, fake_du: Callable[..., Path]) -> None:
+    (home / ".ssh").mkdir()
+    fake_du(
+        stdout=(
+            line(900, home / ".ssh")
+            + line(600, home / "Containers")
+            + line(500, home / "Containers" / ".cache")
+            + line(2000, home)
+        )
+    )
+
+    report = await measure_disk_usage({"home": str(home)}, "home", max_depth=2, include_hidden=True)
+
+    assert [e.path for e in report.entries] == [".ssh", "Containers", "Containers/.cache"]
+    assert report.hidden_omitted == 0
+    assert report.notes == []
+
+
+@pytest.mark.parametrize("path", [".ssh", "Containers/.cache"])
+async def test_hidden_directories_cannot_be_scanned_by_name(home: Path, path: str) -> None:
+    (home / ".ssh").mkdir()
+    (home / "Containers" / ".cache").mkdir()
+
+    with pytest.raises(DiskUsageError, match="hidden directory"):
+        await measure_disk_usage({"home": str(home)}, "home", path)
+
+
+async def test_a_symlink_to_a_hidden_directory_does_not_bypass_the_rule(home: Path) -> None:
+    (home / ".ssh").mkdir()
+    (home / "shortcut").symlink_to(home / ".ssh")
+
+    with pytest.raises(DiskUsageError, match="hidden directory"):
+        await measure_disk_usage({"home": str(home)}, "home", "shortcut")
+
+
+async def test_a_hidden_directory_can_be_scanned_on_request(
+    home: Path, fake_du: Callable[..., Path]
+) -> None:
+    (home / ".ssh").mkdir()
+    fake_du(stdout=line(5, home / ".ssh" / "id_rsa") + line(9, home / ".ssh"))
+
+    report = await measure_disk_usage({"home": str(home)}, "home", ".ssh", include_hidden=True)
+
+    assert report.path == ".ssh"
+    assert [e.path for e in report.entries] == [".ssh/id_rsa"]

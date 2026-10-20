@@ -44,6 +44,7 @@ class DiskUsageReport(BaseModel):
     entries: list[DiskEntry]
     returned: int
     omitted: int
+    hidden_omitted: int
     complete: bool
     unreadable: int
     elapsed_seconds: float
@@ -54,6 +55,7 @@ class DiskUsageReport(BaseModel):
 class _Scan:
     total: int | None = None
     seen: int = 0
+    hidden_omitted: int = 0
     top: list[tuple[int, str]] = field(default_factory=list)
     unreadable: int = 0
     error_samples: list[str] = field(default_factory=list)
@@ -94,6 +96,24 @@ def _relative(path: str, root: str) -> str:
     return os.path.relpath(path, root)
 
 
+def is_hidden(name: str) -> bool:
+    return name.startswith(".")
+
+
+def refuse_hidden_path(root: str, target: str, path: str, include_hidden: bool) -> None:
+    """Hidden entries are not listed, so a hidden directory must not be reachable by name either
+    (directly or through a symlink that resolves to one)."""
+    if include_hidden:
+        return
+    requested = PurePosixPath(path).parts
+    resolved = [part for part in os.path.relpath(target, root).split(os.sep) if part != "."]
+    if any(is_hidden(part) for part in (*requested, *resolved)):
+        raise DiskUsageError(
+            "That path goes through a hidden directory (a name starting with '.'). "
+            "Set include_hidden=true to list it."
+        )
+
+
 def _du_command(
     target: str, *, max_depth: int, include_files: bool, cross_filesystems: bool
 ) -> list[str]:
@@ -113,7 +133,13 @@ def _du_command(
     return [*command, "--", target]
 
 
-async def _read_entries(stream: asyncio.StreamReader, scan: _Scan, target: str, limit: int) -> None:
+def _has_hidden_component(name: str, target: str) -> bool:
+    return any(is_hidden(part) for part in name[len(target) :].split("/"))
+
+
+async def _read_entries(
+    stream: asyncio.StreamReader, scan: _Scan, target: str, limit: int, *, include_hidden: bool
+) -> None:
     async for raw in stream:
         size_text, _, name = raw.decode(errors="replace").rstrip("\n").partition("\t")
         if not size_text.isdigit() or not name:
@@ -121,6 +147,10 @@ async def _read_entries(stream: asyncio.StreamReader, scan: _Scan, target: str, 
         size = int(size_text)
         if name == target:
             scan.total = size
+            continue
+        if not include_hidden and _has_hidden_component(name, target):
+            # Left out of the list only: the totals du reports still count it.
+            scan.hidden_omitted += 1
             continue
         scan.seen += 1
         if len(scan.top) < limit:
@@ -142,8 +172,14 @@ async def _read_errors(stream: asyncio.StreamReader, scan: _Scan, root: str) -> 
             scan.other_errors.append(message)
 
 
-async def _run_du(
-    target: str, root: str, *, limit: int, time_limit: float, command: list[str]
+async def _run_du(  # noqa: PLR0913
+    target: str,
+    root: str,
+    *,
+    limit: int,
+    time_limit: float,
+    command: list[str],
+    include_hidden: bool,
 ) -> _Scan:
     scan = _Scan()
     try:
@@ -158,7 +194,7 @@ async def _run_du(
     assert process.stdout is not None
     assert process.stderr is not None
     readers = asyncio.gather(
-        _read_entries(process.stdout, scan, target, limit),
+        _read_entries(process.stdout, scan, target, limit, include_hidden=include_hidden),
         _read_errors(process.stderr, scan, root),
     )
     try:
@@ -203,9 +239,11 @@ async def measure_disk_usage(  # noqa: PLR0913
     limit: int = DEFAULT_LIMIT,
     include_files: bool = True,
     cross_filesystems: bool = False,
+    include_hidden: bool = False,
     time_limit: float = DEFAULT_TIMEOUT,
 ) -> DiskUsageReport:
     root, target = resolve_target(disks, disk, path)
+    refuse_hidden_path(root, target, path, include_hidden)
     command = _du_command(
         target,
         max_depth=max_depth,
@@ -213,7 +251,14 @@ async def measure_disk_usage(  # noqa: PLR0913
         cross_filesystems=cross_filesystems,
     )
     started = time.monotonic()
-    scan = await _run_du(target, root, limit=limit, time_limit=time_limit, command=command)
+    scan = await _run_du(
+        target,
+        root,
+        limit=limit,
+        time_limit=time_limit,
+        command=command,
+        include_hidden=include_hidden,
+    )
     elapsed = time.monotonic() - started
 
     entries = [
@@ -234,6 +279,11 @@ async def measure_disk_usage(  # noqa: PLR0913
         )
     if omitted:
         notes.append(f"Showing the {len(entries)} largest of {scan.seen} entries.")
+    if scan.hidden_omitted:
+        notes.append(
+            f"{scan.hidden_omitted} hidden entries (names starting with '.') are not listed, but "
+            "their size still counts in the totals; set include_hidden=true to list them."
+        )
     return DiskUsageReport(
         disk=disk,
         path=_relative(target, root) if target != root else ".",
@@ -241,6 +291,7 @@ async def measure_disk_usage(  # noqa: PLR0913
         entries=entries,
         returned=len(entries),
         omitted=omitted,
+        hidden_omitted=scan.hidden_omitted,
         complete=scan.complete,
         unreadable=scan.unreadable,
         elapsed_seconds=round(elapsed, 2),
@@ -285,6 +336,14 @@ def register_disk_tools(mcp: MCPServer, disks: dict[str, str]) -> None:
                 "external drive). By default they are skipped, and so missing from the list."
             ),
         ] = False,
+        include_hidden: Annotated[
+            bool,
+            Field(
+                description="Also list (and allow entering) names starting with '.', which are "
+                "left out of the list by default because they often hold credentials. Their size "
+                "still counts in the totals either way."
+            ),
+        ] = False,
         timeout_seconds: Annotated[
             int,
             Field(
@@ -312,6 +371,7 @@ def register_disk_tools(mcp: MCPServer, disks: dict[str, str]) -> None:
                     limit=limit,
                     include_files=include_files,
                     cross_filesystems=cross_filesystems,
+                    include_hidden=include_hidden,
                     time_limit=timeout_seconds,
                 )
             except DiskUsageError as exc:

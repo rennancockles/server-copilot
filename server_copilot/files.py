@@ -2,7 +2,6 @@ import asyncio
 import os
 import time
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -10,7 +9,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from server_copilot.disk_usage import DiskUsageError, resolve_target
+from server_copilot.disk_usage import (
+    DiskUsageError,
+    is_hidden,
+    refuse_hidden_path,
+    resolve_target,
+)
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
@@ -44,24 +48,6 @@ class FileListing(BaseModel):
     hidden_omitted: int
     scan_truncated: bool
     notes: list[str]
-
-
-def _is_hidden(name: str) -> bool:
-    return name.startswith(".")
-
-
-def _refuse_hidden_path(root: str, target: str, path: str, include_hidden: bool) -> None:
-    """Hidden entries are not listed, so a hidden directory must not be reachable by name either
-    (directly or through a symlink that resolves to one)."""
-    if include_hidden:
-        return
-    requested = PurePosixPath(path).parts
-    resolved = [part for part in os.path.relpath(target, root).split(os.sep) if part != "."]
-    if any(_is_hidden(part) for part in (*requested, *resolved)):
-        raise FileListingError(
-            "That path goes through a hidden directory (a name starting with '.'). "
-            "Set include_hidden=true to list it."
-        )
 
 
 def _describe(entry: os.DirEntry[str]) -> FileEntry:
@@ -107,7 +93,7 @@ def _read_directory(
                     truncated = True
                     break
                 scanned += 1
-                if not include_hidden and _is_hidden(entry.name):
+                if not include_hidden and is_hidden(entry.name):
                     hidden_omitted += 1
                     continue
                 entries.append(_describe(entry))
@@ -141,7 +127,7 @@ def list_directory(  # noqa: PLR0913
     time_limit: float = DEFAULT_TIME_LIMIT,
 ) -> FileListing:
     root, target = resolve_target(disks, disk, path)
-    _refuse_hidden_path(root, target, path, include_hidden)
+    refuse_hidden_path(root, target, path, include_hidden)
     entries, hidden_omitted, scanned, truncated = _read_directory(
         target, include_hidden=include_hidden, time_limit=time_limit
     )
