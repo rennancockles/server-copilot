@@ -292,3 +292,23 @@ def test_the_log_says_where_the_email_came_from_without_revealing_it(
     ]
     assert "me@example.com" not in caplog.text
     assert in_token not in caplog.text
+
+
+def test_a_forbidden_caller_is_logged_as_forbidden_with_the_clients_real_ip(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING)
+    headers = {
+        **MCP_HEADERS,
+        "Authorization": f"Bearer {make_bearer(email='stranger@example.com')}",
+        "Cf-Connecting-Ip": "203.0.113.7",
+    }
+
+    with TestClient(create_app(make_settings())) as client:
+        assert client.post("/mcp", headers=headers, json=INITIALIZE).status_code == 403
+        client.post(
+            "/mcp", headers={**MCP_HEADERS, "Cf-Connecting-Ip": "198.51.100.9"}, json=INITIALIZE
+        )
+
+    assert "Rejected forbidden request: POST /mcp from 203.0.113.7" in caplog.text
+    assert "Rejected unauthenticated request: POST /mcp from 198.51.100.9" in caplog.text

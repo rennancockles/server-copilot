@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 MIN_TOKEN_LENGTH = 32
 PUBLIC_PATHS = frozenset({"/health"})
+CLIENT_IP_HEADER = b"cf-connecting-ip"
 
 
 class AuthConfigError(Exception):
@@ -69,6 +70,17 @@ def _bearer_credentials(scope: Scope) -> bytes | None:
     return None
 
 
+def _client_address(scope: Scope) -> str:
+    """The caller's IP: Cloudflare's header when the request came through the tunnel (the socket
+    peer is then the cloudflared container), else the socket peer. Only used for logging."""
+    headers: list[tuple[bytes, bytes]] = scope["headers"]
+    for name, value in headers:
+        if name == CLIENT_IP_HEADER:
+            return value.decode("latin-1")[:64]
+    client = scope.get("client")
+    return str(client[0]) if client else "unknown"
+
+
 class AuthMiddleware:
     """Static bearer token on /mcp, plus OAuth access tokens when sign-in is configured."""
 
@@ -104,7 +116,7 @@ class AuthMiddleware:
             self._log_rejection(scope)
             await self._unauthorized(invalid_token=exc.description)(scope, receive, send)
         except oauth.OAuthForbiddenError:
-            self._log_rejection(scope)
+            self._log_rejection(scope, "forbidden")
             await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
         else:
             await self.app(scope, receive, send)
@@ -124,11 +136,11 @@ class AuthMiddleware:
         )
 
     @staticmethod
-    def _log_rejection(scope: Scope) -> None:
-        client = scope.get("client")
+    def _log_rejection(scope: Scope, kind: str = "unauthenticated") -> None:
         logger.warning(
-            "Rejected unauthenticated request: %s %s from %s",
+            "Rejected %s request: %s %s from %s",
+            kind,
             scope["method"],
             scope["path"],
-            client[0] if client else "unknown",
+            _client_address(scope),
         )
