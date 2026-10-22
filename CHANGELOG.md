@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.5.0 (2026-10-22)
+
+### Features
+
+- Logar de onde vem o email do token OAuth e tornar os logs de OAuth visíveis (146)
+  ([`085d845`](https://github.com/rennancockles/server-copilot/commit/085d8451d11e0889da4e8642e4c6621ee721a5db))
+
+
 ## v0.4.0 (2026-10-22)
 
 ### Features
