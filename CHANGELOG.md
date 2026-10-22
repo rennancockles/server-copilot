@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.7.0 (2026-10-22)
+
+### Features
+
+- Add get_compose_projects MCP tool
+  ([`9c2932f`](https://github.com/rennancockles/server-copilot/commit/9c2932f4b0df5e1c7cc26554dc715cbdc99672b5))
+
+- Add get_docker_disk_usage MCP tool
+  ([`6775a1c`](https://github.com/rennancockles/server-copilot/commit/6775a1c9f85d4caeaa3d63931b1e22d626ee6182))
+
+
 ## v0.6.0 (2026-10-22)
 
 ### Bug Fixes
