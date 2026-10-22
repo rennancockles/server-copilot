@@ -96,8 +96,10 @@ class DockerClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return (await self._get(path, params)).json()
+    async def get_json(
+        self, path: str, params: dict[str, Any] | None = None, *, time_limit: float | None = None
+    ) -> Any:
+        return (await self._get(path, params, time_limit)).json()
 
     @contextmanager
     def _transport_errors(self, path: str) -> Generator[None]:
@@ -113,9 +115,15 @@ class DockerClient:
                 "Check that docker-socket-proxy is running and reachable on docker-api."
             ) from exc
 
-    async def _get(self, path: str, params: dict[str, Any] | None) -> httpx2.Response:
+    async def _get(
+        self, path: str, params: dict[str, Any] | None, time_limit: float | None = None
+    ) -> httpx2.Response:
         with self._transport_errors(path):
-            response = await self._client.get(path, params=params)
+            response = await self._client.get(
+                path,
+                params=params,
+                timeout=httpx2.USE_CLIENT_DEFAULT if time_limit is None else time_limit,
+            )
         if response.is_success:
             return response
         raise self._error_for(response, path)

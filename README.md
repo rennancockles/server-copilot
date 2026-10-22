@@ -19,6 +19,7 @@ through `docker.sock` directly.
 | `get_container_logs`      | Logs with `tail`, `since`/`until`, text/regex filter and a byte limit.            |
 | `get_container_stats`     | CPU %, memory, network and block I/O of one container.                            |
 | `get_containers_overview` | Usage of every running container, sorted, with totals.                            |
+| `get_docker_disk_usage`   | Docker disk use (images, containers, volumes, build cache) and what could be cleaned up. |
 | `get_host_metrics`        | Host CPU, load, memory, swap, uptime and disk usage per configured mount.         |
 | `get_disk_usage`          | Largest files and directories inside a configured disk, with sizes.               |
 | `list_files`              | Names, types, sizes and dates in one directory of a configured disk (no contents). |
@@ -54,6 +55,7 @@ services:
     environment:
       CONTAINERS: 1 # list/inspect, logs, stats
       EVENTS: 1 # recent_events
+      SYSTEM: 1 # get_docker_disk_usage (read-only /system/df)
       VERSION: 1
       POST: 0
     volumes:
