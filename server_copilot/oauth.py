@@ -19,7 +19,8 @@ import jwt
 
 from server_copilot.config import Settings
 
-logger = logging.getLogger(__name__)
+# Under uvicorn.error so INFO lines reach the container log: nothing else configures logging.
+logger = logging.getLogger("uvicorn.error.oauth")
 
 HTTP_TIMEOUT = 5.0
 MCP_PATH = "/mcp"
@@ -110,7 +111,9 @@ async def authorize(settings: Settings, bearer: str) -> str:
         raise OAuthUnauthorizedError("The access token is invalid or expired.") from exc
 
     identity = claims
+    email_source = "token"
     if "email" not in claims:
+        email_source = "userinfo"
         try:
             identity = await fetch_userinfo(authkit_issuer, bearer)
         except (httpx.HTTPError, ValueError) as exc:
@@ -121,4 +124,5 @@ async def authorize(settings: Settings, bearer: str) -> str:
     if identity.get("email_verified") is not True or not settings.is_oauth_email_allowed(email):
         logger.warning("MCP OAuth: %r is not allowed to use the server", email)
         raise OAuthForbiddenError
+    logger.info("MCP OAuth: access granted, email read from the %s", email_source)
     return email.lower()

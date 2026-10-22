@@ -268,3 +268,27 @@ def test_the_access_token_is_never_logged(caplog: pytest.LogCaptureFixture) -> N
     call(make_settings(), bearer)
 
     assert bearer not in caplog.text
+
+
+def test_the_log_says_where_the_email_came_from_without_revealing_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def fetch_userinfo(_issuer: str, _token: str) -> dict[str, Any]:
+        return {"email": "me@example.com", "email_verified": True}
+
+    monkeypatch.setattr(oauth, "fetch_userinfo", fetch_userinfo)
+    caplog.set_level(logging.INFO, logger=oauth.logger.name)
+    claims = {"iss": ISSUER, "sub": "u", "aud": RESOURCE, "exp": int(time.time()) + 300}
+    no_email = jwt.encode(claims, KEY, algorithm="RS256")
+    in_token = make_bearer()
+
+    call(make_settings(), in_token)
+    call(make_settings(), no_email)
+
+    messages = [r.getMessage() for r in caplog.records if r.name == oauth.logger.name]
+    assert messages == [
+        "MCP OAuth: access granted, email read from the token",
+        "MCP OAuth: access granted, email read from the userinfo",
+    ]
+    assert "me@example.com" not in caplog.text
+    assert in_token not in caplog.text
