@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.4.0 (2026-10-22)
+
+### Features
+
+- Autenticar o /mcp com OAuth (WorkOS AuthKit) e remover a URL com token (144)
+  ([`6b2fab8`](https://github.com/rennancockles/server-copilot/commit/6b2fab829e3ba464b7f052fd5ab5409eb6f0b4ef))
+
+### Testing
+
+- Isolate the suite from SERVER_COPILOT_* env vars and the local .env
+  ([`af49f07`](https://github.com/rennancockles/server-copilot/commit/af49f07ce5326751e72f9afcb230cfe2ce8c85d6))
+
+
 ## v0.3.0 (2026-10-20)
 
 ### Features
