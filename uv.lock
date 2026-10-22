@@ -1574,6 +1574,7 @@ dependencies = [
     { name = "mcp" },
     { name = "psutil" },
     { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "uvicorn" },
 ]
 
@@ -1596,6 +1597,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.3,<3" },
     { name = "psutil", specifier = ">=6" },
     { name = "pydantic-settings", specifier = ">=2.5" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
 

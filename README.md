@@ -115,7 +115,9 @@ environment or from `.env`:
 | ------------------------------ | --------------------------------- | -------------------------------------------------------- |
 | `SERVER_COPILOT_AUTH_TOKEN`    | _(required)_                      | Bearer token for `/mcp`, at least 32 characters.         |
 | `SERVER_COPILOT_AUTH_DISABLED` | `false`                           | Turn authentication off. Local development only.         |
-| `SERVER_COPILOT_URL_TOKEN`     | _(empty)_                         | Optional secret for `/mcp/<token>` (ChatGPT). See below. |
+| `SERVER_COPILOT_PUBLIC_URL`    | _(empty)_                         | Public https origin, no path. Turns on OAuth with the next two. |
+| `SERVER_COPILOT_AUTHKIT_DOMAIN` | _(empty)_                        | WorkOS AuthKit domain (`https://<app>.authkit.app`).     |
+| `SERVER_COPILOT_OAUTH_ALLOWED_EMAILS` | _(empty)_                  | Verified emails allowed to sign in, comma separated. Empty allows nobody. |
 | `SERVER_COPILOT_HOST`          | `0.0.0.0`                         | Interface to bind. Keep it in the container.             |
 | `SERVER_COPILOT_PORT`          | `8000`                            | Port inside the container.                               |
 | `SERVER_COPILOT_DOCKER_HOST`   | `tcp://docker-socket-proxy:2375`  | docker-socket-proxy endpoint (`tcp://host:port`).        |
@@ -134,11 +136,31 @@ public, so the container healthcheck keeps working.
   rejected requests log only the method, path and client address.
 - Rotate it by editing `.env` and your client configuration, then `docker compose up -d`. Do it
   whenever the token may have been exposed (pasted in a chat, screenshot, lost laptop).
-- `SERVER_COPILOT_URL_TOKEN` (optional) opens a second door for clients that cannot send a header:
-  `POST /mcp/<token>` serves the same tools. It is a separate secret, so you can rotate or remove it
-  without touching the bearer token, and the bearer token never appears in a URL. Any other
-  `/mcp/...` path answers `404`; only `POST` is accepted. Use only letters, digits, `-` and `_`
-  (at least 32 characters, different from the bearer token).
+- OAuth sign-in (below) is an extra way in for clients that cannot send a header, such as ChatGPT.
+  The bearer token keeps working next to it.
+
+### OAuth sign-in (WorkOS AuthKit)
+
+Set `SERVER_COPILOT_PUBLIC_URL` and `SERVER_COPILOT_AUTHKIT_DOMAIN` (both or neither; both must be
+`https://`) and `/mcp` also accepts an access token issued by a [WorkOS AuthKit](https://workos.com/docs/authkit/mcp)
+project. The server implements no OAuth endpoints: AuthKit owns sign-in, consent and token issuing,
+and this server only validates the token.
+
+- Every request checks the signature (JWKS), issuer, expiry and **audience**. The audience must be
+  exactly `<SERVER_COPILOT_PUBLIC_URL>/mcp`, so a token issued for another MCP (the KanbAI connector,
+  say) or for the AuthKit client id is refused with `401`.
+- The caller's **verified email** must be on `SERVER_COPILOT_OAUTH_ALLOWED_EMAILS`. The list is
+  deny-by-default: empty means nobody gets in (the server warns at startup). A valid token of
+  anyone else gets `403`.
+- Clients find the AuthKit domain through `/.well-known/oauth-protected-resource/mcp` (public) and
+  the `resource_metadata` link in the `WWW-Authenticate` header of the `401`.
+- There are no custom scopes: AuthKit offers only `openid`, `email`, `profile` and
+  `offline_access`, so access is the audience plus the allowlist. Every tool is read-only anyway.
+
+Set it up in the WorkOS dashboard: enable AuthKit, enable *Client ID Metadata Document* and/or
+*Dynamic Client Registration* (*Connect → Configuration*), and add the **Resource Indicator**
+`https://<your-host>/mcp` (this exact URL, the same one you give the client). Turn *Sign up* off and
+invite your own email if the login should stay private.
 
 ## Host metrics
 
@@ -240,20 +262,14 @@ clients report as an OAuth error such as `auth() returned AUTHORIZED without aut
 
 **Claude Desktop** and other clients that only accept local (stdio) servers can use the
 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge with the same URL and header.
-Claude.ai custom connectors expect OAuth, which this server does not implement.
+Claude.ai custom connectors expect OAuth, which works with the sign-in above.
 
-**ChatGPT:** its connectors only offer OAuth or no authentication, so use the secret URL. Generate
-a token (`openssl rand -hex 32`), set it as `SERVER_COPILOT_URL_TOKEN`, restart, and in ChatGPT
-(_Settings, Connectors, Developer mode_) create a connector with the URL
-`https://<your-host>/mcp/<url-token>` and authentication set to _None_ (menu names are ChatGPT's and
-change). Treat that URL like a password:
-
-- The server runs uvicorn without its access log, because request lines would print the secret, and
-  its own rejection log shows `/mcp/<redacted>`. Cloudflare still records request URLs in its
-  security events, and ChatGPT stores the URL in the connector.
-- All tools are read-only, but they include container logs and host metrics. To revoke access,
-  change or unset `SERVER_COPILOT_URL_TOKEN` and restart; the old URL answers `404` at once.
-- The server answers statelessly with JSON, which is what ChatGPT connectors expect.
+**ChatGPT:** its connectors only offer OAuth or no authentication, so enable the OAuth sign-in
+above. In ChatGPT (_Settings, Connectors, Developer mode_) create a connector with the URL
+`https://<your-host>/mcp` and authentication set to _OAuth_ (menu names are ChatGPT's and change);
+it sends you to AuthKit to sign in. To revoke access, remove the email from
+`SERVER_COPILOT_OAUTH_ALLOWED_EMAILS` and restart, or remove the user in the WorkOS dashboard. The
+server answers statelessly with JSON, which is what ChatGPT connectors expect.
 
 **MCP Inspector:** run `npx @modelcontextprotocol/inspector`, choose _Streamable HTTP_, enter the
 URL and add the `Authorization` header.

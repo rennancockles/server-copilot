@@ -18,7 +18,6 @@ def main() -> None:
         logging.getLogger("uvicorn.error").warning(
             "Authentication is DISABLED: anyone who can reach this port can use every tool."
         )
-    # The access log would print the secret in /mcp/<token> request lines.
     uvicorn.run(app, host=settings.host, port=settings.port, access_log=False)
 
 

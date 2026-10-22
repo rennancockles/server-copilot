@@ -13,6 +13,7 @@ dependencies = [
     "httpx2>=2.10",
     "psutil>=6",
     "pydantic-settings>=2.5",
+    "pyjwt[crypto]>=2.8",
     "uvicorn>=0.30",
 ]
 
