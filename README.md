@@ -162,6 +162,10 @@ Set it up in the WorkOS dashboard: enable AuthKit, enable *Client ID Metadata Do
 `https://<your-host>/mcp` (this exact URL, the same one you give the client). Turn *Sign up* off and
 invite your own email if the login should stay private.
 
+Revoking access, recovering from a wrong allowlist or a lost WorkOS project, updating PyJWT and
+watching the sign-in logs are covered in `docs/oauth-operations.md` of the kanbai_server repository,
+which runs on the same WorkOS project.
+
 ## Host metrics
 
 `get_host_metrics` reports CPU %, load average, memory, swap and uptime of the host. These come
