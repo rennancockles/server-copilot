@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dev-6ada1c2987708191abea5aa643aa3558",
+  "version": "0.5.0",
+  "description": "Consulte containers, logs e métricas do seu servidor doméstico.",
+  "author": {
+    "email": "r3ck.dev@gmail.com",
+    "name": "R3Ck"
+  },
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "displayName": "Server Copilot",
+        "shortDescription": "Containers, logs e métricas do servidor",
+        "longDescription": "Consulte containers, logs, uso de recursos, discos e eventos do Docker do seu servidor doméstico, somente leitura.",
+        "developerName": "R3Ck",
+        "category": "Productivity",
+        "capabilities": ["Read"],
+        "defaultPrompt": "Há algum container com problema no meu servidor?",
+        "composerIcon": "./assets/icon.png",
+        "logo": "./assets/logo.png"
+      }
+    }
+  }
+}

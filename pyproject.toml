@@ -112,7 +112,9 @@ version_toml = [
   "pyproject.toml:project.version",
 ]
 version_variables = [
-  "server_copilot/__init__.py:__version__"
+  "server_copilot/__init__.py:__version__",
+  "chatgpt-plugin/plugin.json:version",
+  "chatgpt-plugin/.codex-plugin/plugin.json:version"
 ]
 
 [tool.semantic_release.changelog]

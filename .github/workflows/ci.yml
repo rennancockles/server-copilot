@@ -119,6 +119,29 @@ jobs:
           echo "version=$tag" >> "$GITHUB_OUTPUT"
           echo "minor=${tag%.*}" >> "$GITHUB_OUTPUT"
 
+  plugin:
+    name: ChatGPT plugin zip
+    runs-on: ubuntu-latest
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    permissions:
+      contents: write # attach the zip to the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      # Fails when the manifests do not carry the tag's version, so a zip is never an old version.
+      - name: Build the ChatGPT plugin zip
+        run: |
+          TAG="${{ needs.release.outputs.tag }}"
+          python3 scripts/build_chatgpt_plugin.py dist-plugin --expect-version "${TAG#v}"
+
+      - name: Attach it to the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" dist-plugin/*.zip --clobber
+
   publish:
     name: Publish image to GHCR
     runs-on: ubuntu-latest

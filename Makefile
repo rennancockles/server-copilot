@@ -6,7 +6,7 @@
         test test_cov test-unit test-ci \
         security-scan \
         release-dry release \
-        env-check clean
+        plugin-zip env-check clean
 
 .DEFAULT_GOAL := help
 
@@ -108,6 +108,9 @@ pre-commit-sim: ## Simulate pre-commit locally (for debugging hooks)
 	@$(RUN) ruff format .
 
 ##@ Testing
+
+plugin-zip: ## Zip the ChatGPT plugin (chatgpt-plugin/) into dist/ for upload
+	@$(RUN) python scripts/build_chatgpt_plugin.py dist
 
 test: ## Run tests with coverage (parallel)
 	@printf "$(YELLOW)Running tests…$(RESET)\n"

@@ -306,15 +306,36 @@ SERVER_COPILOT_DOCKER_HOST=tcp://localhost:2375 uv run server-copilot
 3. `release` (only on `main`, only if all of the above passed): runs
    [python-semantic-release](https://python-semantic-release.readthedocs.io), which reads the
    [Conventional Commits](https://www.conventionalcommits.org) since the last tag, bumps the version
-   in `pyproject.toml`, `server_copilot/__init__.py` and `uv.lock`, updates `CHANGELOG.md`, commits,
-   tags (`0.1.0`, no `v` prefix) and creates a GitHub release.
-4. `publish` (only if step 3 actually released): builds the image for `linux/amd64` and
+   in `pyproject.toml`, `server_copilot/__init__.py`, `uv.lock` and the two ChatGPT plugin manifests
+   (see below), updates `CHANGELOG.md`, commits, tags (`0.1.0`, no `v` prefix) and creates a GitHub
+   release.
+4. `plugin` (only if step 3 actually released): zips `chatgpt-plugin/` and attaches
+   `server-copilot-chatgpt-plugin-<version>.zip` to that GitHub release.
+5. `publish` (only if step 3 actually released): builds the image for `linux/amd64` and
    `linux/arm64` from the release tag and pushes it to GitHub Container Registry.
 
 Commit types decide what happens: `feat` bumps the minor version, `fix` and `perf` bump the patch
 version, and `chore`, `docs`, `ci`, `refactor`, `test`, `style` and `build` publish nothing. While
 the version is `0.x`, a breaking change (`feat!:` or a `BREAKING CHANGE:` footer) bumps the major
 version to `1.0.0`. Preview the next version locally with `make release-dry`.
+
+### The ChatGPT plugin
+
+`chatgpt-plugin/` holds the plugin that presents this server inside ChatGPT: the manifests
+(`plugin.json`, `.codex-plugin/plugin.json`), `.app.json` with the app id and the images in
+`assets/`. Its version follows the server's: every release rewrites the `version` of both manifests,
+so do not edit it by hand.
+
+To publish an update, download `server-copilot-chatgpt-plugin-<version>.zip` from the release page
+and upload it as the plugin update in ChatGPT. The zip holds the *contents* of the folder at its
+root (dotfiles included, no `.DS_Store`). `make plugin-zip` builds the same zip into `dist/`
+without a release.
+
+**Before the first zip:** `.app.json` ships with a placeholder id
+(`asdk_app_REPLACE_WITH_THE_APP_ID`). Put the app id ChatGPT gave you there (and the plugin `name`
+in both manifests if ChatGPT assigned one). Until then the build refuses to produce a zip, so the
+`plugin` job of the next release fails instead of shipping an invalid plugin; the release and the
+image are not affected.
 
 Images are published as `ghcr.io/<owner>/server-copilot` with the tags `<version>` (for example
 `0.1.0`), `<major>.<minor>` and `latest`. The compose file already points at it; to update the
