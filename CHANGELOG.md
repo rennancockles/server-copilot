@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.6.0 (2026-10-22)
+
+### Bug Fixes
+
+- Separar o log de 403 do de 401 e registrar o IP real do cliente atrás do túnel (146)
+  ([`1b71fc0`](https://github.com/rennancockles/server-copilot/commit/1b71fc081633f72654de956f0cf5d1c3fd48f118))
+
+### Documentation
+
+- Apontar para o runbook de operação do OAuth (148)
+  ([`7b66fa3`](https://github.com/rennancockles/server-copilot/commit/7b66fa3f5ff28ad99cda2dfdb6e35dafaedb3c36))
+
+### Features
+
+- Versionar o plugin do ChatGPT com o servidor e anexar o zip a cada release
+  ([`72c16dc`](https://github.com/rennancockles/server-copilot/commit/72c16dcc52a9691d021d9cba699238addc69ca2e))
+
+
 ## v0.5.0 (2026-10-22)
 
 ### Features
