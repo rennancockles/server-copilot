@@ -16,6 +16,7 @@ through `docker.sock` directly.
 | `ping`                    | Liveness check.                                                                   |
 | `list_containers`         | List containers; filter by status, name or label; shows compose project/service.  |
 | `inspect_container`       | State, health, restarts, ports, networks, mounts, env (secrets masked).           |
+| `get_compose_projects`    | Compose projects with status, directory, compose files, services and containers. |
 | `get_container_logs`      | Logs with `tail`, `since`/`until`, text/regex filter and a byte limit.            |
 | `get_container_stats`     | CPU %, memory, network and block I/O of one container.                            |
 | `get_containers_overview` | Usage of every running container, sorted, with totals.                            |
