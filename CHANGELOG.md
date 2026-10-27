@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.9.0 (2026-10-27)
+
+### Features
+
+- Add LAN device discovery MCP tools and scanner service
+  ([`d8adcbc`](https://github.com/rennancockles/server-copilot/commit/d8adcbc92fd1da5b39c5240bba2b61230b6dc022))
+
+
 ## v0.8.0 (2026-10-27)
 
 ### Features
