@@ -12,7 +12,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12-slim
-RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin copilot
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin copilot \
+    && mkdir /var/lib/server-copilot-network \
+    && chown copilot:copilot /var/lib/server-copilot-network
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

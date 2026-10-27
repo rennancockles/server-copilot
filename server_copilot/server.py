@@ -19,6 +19,7 @@ from server_copilot.docker_usage import register_docker_usage_tools
 from server_copilot.files import register_file_tools
 from server_copilot.host import parse_disks, register_host_tools
 from server_copilot.logs import register_log_tools
+from server_copilot.network import register_network_tools
 from server_copilot.stats import register_stats_tools
 
 
@@ -61,5 +62,6 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
     register_file_tools(mcp, disks)
     register_diagnostic_tools(mcp, client)
     register_backup_tools(mcp, settings.backup_status_file)
+    register_network_tools(mcp, settings.network_scan_file)
 
     return mcp

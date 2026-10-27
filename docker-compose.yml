@@ -11,14 +11,19 @@ services:
       SERVER_COPILOT_DOCKER_HOST: ${SERVER_COPILOT_DOCKER_HOST:-tcp://docker-socket-proxy:2375}
       SERVER_COPILOT_HOST_DISKS: ${SERVER_COPILOT_HOST_DISKS:-}
       SERVER_COPILOT_AUTH_TOKEN: ${SERVER_COPILOT_AUTH_TOKEN:?set SERVER_COPILOT_AUTH_TOKEN in .env (openssl rand -hex 32)}
+      # Where the scanner service (profile lan-scan, below) leaves its snapshot. Without that
+      # service the network tools answer "unknown".
+      SERVER_COPILOT_NETWORK_SCAN_FILE: /var/lib/server-copilot-network/scan.json
     # To scan a home directory with get_disk_usage, also run as the host user (mode 750 homes):
     #   user: "1000:1000"
-    # Host disks: bind-mount each filesystem to monitor read-only and list it in
-    # SERVER_COPILOT_HOST_DISKS (name=/container/path,...), e.g.:
+    # Host disks: bind-mount each filesystem to monitor read-only, next to the scan volume,
+    # and list it in SERVER_COPILOT_HOST_DISKS (name=/container/path,...), e.g.:
     #   SERVER_COPILOT_HOST_DISKS=root=/host/root,data=/host/data
-    # volumes:
-    #   - /:/host/root:ro
-    #   - /mnt/data:/host/data:ro
+    #   volumes:
+    #     - /:/host/root:ro
+    #     - /mnt/data:/host/data:ro
+    volumes:
+      - network-scan:/var/lib/server-copilot-network:ro
     networks:
       - docker-api
       - edge
@@ -29,6 +34,51 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+
+  # LAN discovery for discover_network_devices / inspect_network_device. It needs the host's
+  # network (ARP, mDNS and SSDP do not cross a Docker bridge), so it is a separate, opt-in
+  # service: `docker compose --profile lan-scan up -d`. It publishes no port, holds no
+  # capability, and receives neither the auth token nor the Docker proxy.
+  server-copilot-scanner:
+    profiles:
+      - lan-scan
+    image: ghcr.io/rennancockles/server-copilot:${SERVER_COPILOT_VERSION:-latest}
+    container_name: server-copilot-scanner
+    restart: unless-stopped
+    command: ["server-copilot-scanner"]
+    network_mode: host
+    environment:
+      SERVER_COPILOT_NETWORK_SCAN_FILE: /var/lib/server-copilot-network/scan.json
+      SERVER_COPILOT_NETWORK_SCAN_CIDRS: ${SERVER_COPILOT_NETWORK_SCAN_CIDRS:-}
+      SERVER_COPILOT_NETWORK_SCAN_INTERVAL_SECONDS: ${SERVER_COPILOT_NETWORK_SCAN_INTERVAL_SECONDS:-300}
+      SERVER_COPILOT_NETWORK_SCAN_TIMEOUT_SECONDS: ${SERVER_COPILOT_NETWORK_SCAN_TIMEOUT_SECONDS:-120}
+    volumes:
+      - network-scan:/var/lib/server-copilot-network
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os, sys, time;
+          env = os.environ.get;
+          limit = 3 * int(env("SERVER_COPILOT_NETWORK_SCAN_INTERVAL_SECONDS", "300"))
+          + int(env("SERVER_COPILOT_NETWORK_SCAN_TIMEOUT_SECONDS", "120"));
+          sys.exit(time.time() - os.path.getmtime(env("SERVER_COPILOT_NETWORK_SCAN_FILE")) > limit)
+      interval: 60s
+      timeout: 5s
+      start_period: 240s
+      retries: 3
+
+volumes:
+  network-scan:
 
 networks:
   docker-api:

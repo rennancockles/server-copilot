@@ -27,6 +27,8 @@ through `docker.sock` directly.
 | `recent_events`           | Docker events (start, die, oom, restart, health) in a time window.                |
 | `find_problem_containers` | Unhealthy, restart-looping, OOM-killed, dead or crashed containers.               |
 | `get_backup_status`       | Whether the host backups ran, are recent and can be recovered: last run, snapshot ages, integrity check and restore test. |
+| `discover_network_devices` | Devices on the home LAN with IP, MAC, maker, name, guessed type and open ports, plus findings (new device, changed gateway MAC, ...). |
+| `inspect_network_device`  | Everything known about one LAN device (by IP, MAC or name), observed facts kept apart from guesses; for a Samsung TV, its model, name, firmware and Tizen version. |
 
 All tools are annotated read-only. Environment variables and labels whose names look sensitive
 (`password`, `token`, `key`, `secret`, ...) and credentials inside URLs are masked, but **log
@@ -127,6 +129,10 @@ environment or from `.env`:
 | `SERVER_COPILOT_DOCKER_HOST`   | `tcp://docker-socket-proxy:2375`  | docker-socket-proxy endpoint (`tcp://host:port`).        |
 | `SERVER_COPILOT_HOST_DISKS`    | _(empty)_                         | Disks to report, `name=/container/path`, comma separated. |
 | `SERVER_COPILOT_BACKUP_STATUS_FILE` | _(empty)_                    | JSON file the host writes about its backups (see Backup status). Empty makes `get_backup_status` answer `unknown`. |
+| `SERVER_COPILOT_NETWORK_SCAN_FILE` | _(empty)_                     | Snapshot the scanner service writes and the network tools read (see Network discovery). Empty makes them answer `unknown`. The compose file sets it. |
+| `SERVER_COPILOT_NETWORK_SCAN_CIDRS` | _(empty)_                    | Scanner only: private networks it may probe, comma separated, each at most a `/22`. Empty scans the subnets of the host's own interfaces. |
+| `SERVER_COPILOT_NETWORK_SCAN_INTERVAL_SECONDS` | `300`             | Scanner only: seconds between scans (60 to 86400).       |
+| `SERVER_COPILOT_NETWORK_SCAN_TIMEOUT_SECONDS` | `120`              | Scanner only: time limit of one scan (10 to 900); a scan that hits it keeps what it found and says so. |
 
 ## Authentication
 
@@ -311,6 +317,111 @@ passwords and tokens are never part of the file or of the answer.
 
 `schema_version` must be `1`; all timestamps need a timezone. A new version of the file needs a
 matching version of the server, and until then the answer is `unknown`.
+
+## Network discovery
+
+`discover_network_devices` and `inspect_network_device` answer "what is on my network?", "what is the
+printer's IP?", "which ones are the TVs?" and "is anything unusual going on?". They run nothing
+themselves: they read a snapshot that a small **scanner service** writes every few minutes, so an
+answer is as old as the last scan (`age_minutes` says how old).
+
+### Why a separate scanner
+
+MAC addresses, mDNS and SSDP only exist on the LAN itself. Inside a Docker bridge network the
+container sees the bridge (`172.x`), not your LAN, and multicast does not cross it. Moving
+`server-copilot` to the host network would remove it from `docker-api` and `edge` (the tunnel could no
+longer reach it by name) and open `/mcp` on every interface. So the scanner is a second service from
+the **same image**, with `network_mode: host`, and it is opt-in. It publishes no port, drops every
+capability, has a read-only root filesystem and gets neither the access token nor the Docker proxy.
+The MCP server only reads what it leaves in a shared volume, mounted read-only.
+
+```
+docker compose --profile lan-scan up -d    # starts server-copilot-scanner next to server-copilot
+docker compose ps                          # the scanner becomes "healthy" after its first scan
+```
+
+The first scan takes under a minute. Until it ends, the tools answer `status: unknown`, with the
+reason. Host networking works on a Linux host; Docker Desktop (macOS, Windows) runs containers in a VM
+and would only see that VM's network.
+
+### What the scanner does
+
+It only talks to **private IPv4 networks** (`10/8`, `172.16/12`, `192.168/16`). By default it scans the
+subnets of the host's physical interfaces (Docker bridges, `veth`, VPN and loopback interfaces are
+skipped), so nothing assumes `192.168.1.0/24`; a subnet larger than a `/24` is cut to the `/24` around
+the host's address and a note says so. To choose exactly what is scanned, set
+`SERVER_COPILOT_NETWORK_SCAN_CIDRS=192.168.1.0/24,10.0.5.0/24`. Anything that is not private, or is
+larger than a `/22`, stops the scanner at startup with a clear message. Nothing on the Internet is
+ever probed.
+
+Per scan, in this order, all without privileges or raw sockets (no `nmap`, no extra capability):
+
+1. **ARP**: one byte to the discard port of each address, paced in small batches, so the kernel asks
+   "who has this IP?"; the scanner then reads the host's neighbour table (`/proc/net/arp`) for MAC
+   addresses, and `/proc/net/route` for the default gateway.
+2. **mDNS and SSDP**: one multicast query each, on every scanned interface, with a few seconds to
+   answer.
+3. **TCP connect** (no data sent) to 30 well-known ports (SSH, HTTP(S), SMB, printing, RTSP, casting,
+   Samsung and LG TV control, ...) of the devices found in steps 1 and 2.
+4. **UPnP description** of each device that answered SSDP, **Samsung TV API** (`GET :8001/api/v2/`, no
+   login) when port 8001 is open, and a reverse DNS lookup for devices without an mDNS name.
+
+It never logs in, pairs, sends commands or changes anything on a device. Every probe has a timeout,
+connections are capped at 128 at once, a whole scan has a time limit, and every response is size
+limited. A UPnP description is only fetched from the very device that announced it (a device cannot
+point the scanner at another address), and XML with a DTD or entities is refused. Logs hold only
+counts and timings, never addresses, MACs or names.
+
+### What you get back
+
+Each device carries IP, MAC (when it is on the same LAN segment), maker (from the MAC prefix), hostname
+and friendly name, open ports, announced services and when it was first and last seen. Observed facts
+and guesses are kept apart:
+
+- **Observed**: IP, MAC, open ports, mDNS and UPnP services, what a Samsung TV reports about itself
+  (name, model, model code, firmware when it gives one, OS, API version).
+- **Inferred**, with a `confidence` and the `evidence` behind it: the device type (`router`, `printer`,
+  `tv`, `media_player`, `camera`, `nas`, `computer`, `phone_or_tablet`, `smart_home`, `unknown`), the maker
+  from the MAC prefix (none for a randomized MAC, as phones use), and the Samsung release year and
+  Tizen version, which come from the model code (`19_...` is a 2019 TV, Tizen 5.0).
+
+`inspect_network_device` accepts an IP, a MAC in any common notation, or part of a name, maker or
+model. A device that was seen before but is missing now comes back with `online: false` and its last
+known address, so "where was the printer?" still has an answer.
+
+### Findings: "is anything unusual?"
+
+The scanner keeps a small history (`network-history.json`, next to the snapshot) of the devices it has
+seen. During the first 24 hours it only learns; after that it reports:
+
+| Finding               | Severity           | When                                                                  |
+| --------------------- | ------------------ | --------------------------------------------------------------------- |
+| `new_device`          | `info` / `warning` | A device first seen in the last 7 days, after the learning period. `warning` when its type is unknown or it exposes a risky port. |
+| `gateway_mac_changed` | `alert`            | The default gateway's MAC changed (kept for 7 days). Expected after replacing the router; it is also how ARP spoofing looks. |
+| `duplicate_mac`       | `warning`          | One MAC answers for several IPs: a device with several addresses, or something impersonating others. |
+| `risky_ports`         | `warning`          | FTP, Telnet, RDP, VNC or the Docker API (2375) is open on a device.   |
+
+A device that was off during the learning period and shows up later is reported as new, like any
+other newcomer. Deleting the history file starts a new learning period.
+
+### Things to know
+
+- IPv4 only, and only devices that share a broadcast domain with the host appear with a MAC. A guest
+  Wi-Fi or VLAN that the router isolates cannot be seen from here; one that it routes can be scanned
+  by listing it in `SERVER_COPILOT_NETWORK_SCAN_CIDRS`, but then without MACs, mDNS or SSDP.
+- Phones and laptops often use a different, randomized MAC per network: they are listed, but have no
+  maker, and a changed MAC does not mean a different device.
+- Many devices ignore probes while asleep; a TV in standby may answer ARP but not its API, so its type
+  stays a guess. If one device is missing, wake it and wait for the next scan.
+- Device names, hostnames and models come from the devices themselves. They are reduced to plain
+  characters and 64 characters, and the tool descriptions tell the client to treat them as untrusted
+  text, but a name is still attacker-controlled input on a network with guests or IoT gear.
+- The answer contains the MAC addresses and names of your devices; anyone holding the access token
+  can read them.
+
+Examples: "What devices are on my network?", "What is the IP of the printer?", "Show me the TVs and
+their model and firmware.", "Has any new device appeared this week?", "Is the router's MAC still the
+same?".
 
 ## Connecting clients
 
