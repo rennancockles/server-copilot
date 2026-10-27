@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.8.0 (2026-10-27)
+
+### Features
+
+- Add get_backup_status MCP tool
+  ([`155802b`](https://github.com/rennancockles/server-copilot/commit/155802b1eb068b17c7f8990ace11af4651da284c))
+
+### Testing
+
+- Freeze the clock without subclassing datetime
+  ([`208292d`](https://github.com/rennancockles/server-copilot/commit/208292d0157a750da001d407dc611f185ce00605))
+
+
 ## v0.7.0 (2026-10-22)
 
 ### Features
