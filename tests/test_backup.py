@@ -3,6 +3,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx2
@@ -330,12 +331,7 @@ def make_client() -> DockerClient:
 async def test_tool_is_registered_read_only_and_reports_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz: Any = None) -> datetime:
-            return NOW
-
-    monkeypatch.setattr(backup, "datetime", FrozenDatetime)
+    monkeypatch.setattr(backup, "datetime", SimpleNamespace(now=lambda tz=None: NOW))
     monkeypatch.setenv("SERVER_COPILOT_BACKUP_STATUS_FILE", write(tmp_path, healthy()))
     mcp = create_server(make_client())
 
