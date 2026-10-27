@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     port: int = 8000
     docker_host: str = "tcp://docker-socket-proxy:2375"
     host_disks: str = ""
+    # JSON file the host writes about its backups (bind-mount its folder read-only). Empty
+    # disables get_backup_status, which then answers "unknown".
+    backup_status_file: str = ""
     auth_token: SecretStr | None = None
     auth_disabled: bool = False
     # Public https origin of this server (https://server-copilot.example.com, no path).

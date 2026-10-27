@@ -8,6 +8,7 @@ from mcp.types import Icon
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from server_copilot.backup import register_backup_tools
 from server_copilot.compose import register_compose_tools
 from server_copilot.config import get_settings
 from server_copilot.containers import register_container_tools
@@ -59,5 +60,6 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
     register_disk_tools(mcp, disks)
     register_file_tools(mcp, disks)
     register_diagnostic_tools(mcp, client)
+    register_backup_tools(mcp, settings.backup_status_file)
 
     return mcp

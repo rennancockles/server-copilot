@@ -26,6 +26,7 @@ through `docker.sock` directly.
 | `list_files`              | Names, types, sizes and dates in one directory of a configured disk (no contents). |
 | `recent_events`           | Docker events (start, die, oom, restart, health) in a time window.                |
 | `find_problem_containers` | Unhealthy, restart-looping, OOM-killed, dead or crashed containers.               |
+| `get_backup_status`       | Whether the host backups ran, are recent and can be recovered: last run, snapshot ages, integrity check and restore test. |
 
 All tools are annotated read-only. Environment variables and labels whose names look sensitive
 (`password`, `token`, `key`, `secret`, ...) and credentials inside URLs are masked, but **log
@@ -125,6 +126,7 @@ environment or from `.env`:
 | `SERVER_COPILOT_PORT`          | `8000`                            | Port inside the container.                               |
 | `SERVER_COPILOT_DOCKER_HOST`   | `tcp://docker-socket-proxy:2375`  | docker-socket-proxy endpoint (`tcp://host:port`).        |
 | `SERVER_COPILOT_HOST_DISKS`    | _(empty)_                         | Disks to report, `name=/container/path`, comma separated. |
+| `SERVER_COPILOT_BACKUP_STATUS_FILE` | _(empty)_                    | JSON file the host writes about its backups (see Backup status). Empty makes `get_backup_status` answer `unknown`. |
 
 ## Authentication
 
@@ -240,6 +242,75 @@ it. It uses the same disks and the same path rules as `get_disk_usage`.
   `offset` page through large directories. A directory with more than 20,000 entries, or one that
   takes more than 10 seconds to read, is only partly read, and the answer says so.
 - A directory's own size is not shown; use `get_disk_usage` for that.
+
+## Backup status
+
+`get_backup_status` answers questions such as "did yesterday's backup run?", "when was the last
+backup?", "did the monthly restore test pass?" and "how much space is left on the Drive?". It runs
+nothing: it reads a small JSON file that the host writes after every backup run, repository check
+and restore test, and works out the verdict when you ask.
+
+Bind-mount the **folder** that holds the file, read-only, and point the setting at the file:
+
+```yaml
+environment:
+  SERVER_COPILOT_BACKUP_STATUS_FILE: /host/backup-status/backup-status.json
+volumes:
+  - /var/lib/home-server-infra-status:/host/backup-status:ro
+```
+
+Mount the folder, not the file: the host replaces the file atomically, and a bind-mounted single
+file keeps pointing at the old copy. The folder must be readable by the user the container runs as,
+and should hold nothing but this file.
+
+The answer reports three things separately, because "the job ran" is not "the backup can be
+recovered": `backup` (last run with its result, duration and failed step names; the age of the
+newest snapshot in each repository; size and free space), `integrity` (the periodic `restic check`)
+and `restore_test` (the monthly restore, with the next run when known). Ages are in hours and every
+timestamp carries its timezone. The overall `status` is:
+
+| Status    | When                                                                                     |
+| --------- | ---------------------------------------------------------------------------------------- |
+| `error`   | The last run failed; there is no successful run; the last success or a repository's newest snapshot is older than `max_backup_age_hours` (26 by default); a repository has no readable snapshot; the integrity check or the restore test failed. |
+| `warning` | The integrity check (9 days) or the restore test (35 days) never ran or is older than expected; the status file itself was not refreshed within `max_backup_age_hours`. |
+| `ok`      | None of the above.                                                                       |
+| `unknown` | There is no usable data: not configured, file missing, unreadable, larger than 64 KiB, not valid JSON, not the expected format or schema version, or the read timed out (5 s). Never read it as healthy. |
+
+Only the fields below are read; anything else in the file is ignored, so it can never reach a
+response. Failed steps are step names, cut to safe characters and 60 characters. Paths, logs,
+passwords and tokens are never part of the file or of the answer.
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-27T05:07:12Z",
+  "max_backup_age_hours": 26,
+  "backup": {
+    "last_run": {
+      "started_at": "2026-10-27T05:06:20Z",
+      "finished_at": "2026-10-27T05:07:08Z",
+      "duration_seconds": 48,
+      "result": "ok",
+      "failed_steps": []
+    },
+    "last_success_at": "2026-10-27T05:07:08Z",
+    "repositories": {
+      "local": {"newest_snapshot_at": "2026-10-27T05:06:40Z", "size_bytes": 800000000, "free_bytes": null},
+      "drive": {"newest_snapshot_at": "2026-10-27T05:06:41Z", "size_bytes": 790000000, "free_bytes": 30000000000}
+    }
+  },
+  "integrity": {"finished_at": "2026-10-25T07:02:00Z", "duration_seconds": 40, "result": "ok"},
+  "restore_test": {
+    "finished_at": "2026-10-01T08:03:00Z",
+    "duration_seconds": 38,
+    "result": "ok",
+    "next_run_at": "2026-11-01T08:00:00Z"
+  }
+}
+```
+
+`schema_version` must be `1`; all timestamps need a timezone. A new version of the file needs a
+matching version of the server, and until then the answer is `unknown`.
 
 ## Connecting clients
 
