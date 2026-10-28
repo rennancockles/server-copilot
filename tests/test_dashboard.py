@@ -236,6 +236,15 @@ def test_the_host_section_reports_numbers_and_stays_ok_when_nothing_is_full() ->
     assert section.note is None
 
 
+def test_mounts_of_the_same_filesystem_are_one_disk() -> None:
+    metrics = host_metrics(disks=[80.0, 80.0, 30.0])
+
+    section = host_section(metrics, {"d0": 7, "d1": 7, "d2": 9})
+
+    assert [(d.name, d.percent) for d in section.disks] == [("d0 / d1", 80.0), ("d2", 30.0)]
+    assert [d.name for d in host_section(metrics).disks] == ["d0", "d1", "d2"]
+
+
 @pytest.mark.parametrize(
     ("disks", "memory", "state"),
     [
@@ -273,6 +282,36 @@ def test_containers_count_running_and_stopped_and_list_the_busiest() -> None:
     assert [c.name for c in section.top_cpu] == ["c7", "c6", "c5", "c4", "c3"]
     assert [c.name for c in section.top_memory] == ["c0", "c1", "c2", "c3", "c4"]
     assert section.problems == []
+
+
+def test_containers_are_grouped_by_stack_with_their_usage_and_problems() -> None:
+    def member(name: str, project: str | None, state: str = "running") -> ContainerSummary:
+        return summary(name, state).model_copy(update={"compose_project": project})
+
+    listed = [
+        member("plex", "media"),
+        member("sonarr", "media"),
+        member("alloy", "monitoring"),
+        member("grafana", "monitoring", "exited"),
+        member("loner", None),
+    ]
+    report = ProblemReport(
+        problem_containers=[problem("grafana", "unhealthy")], checked=5, errors=[]
+    )
+
+    section = containers_section(listed, report, overview(stats("plex", 1.5, 2**20)))
+
+    assert [(s.name, s.state, s.running) for s in section.stacks] == [
+        ("media", "ok", 2),
+        ("monitoring", "error", 1),
+        (None, "ok", 1),
+    ]
+    media = section.stacks[0].containers
+    assert [(c.name, c.cpu_percent, c.memory_usage_bytes) for c in media] == [
+        ("plex", 1.5, 2**20),
+        ("sonarr", None, None),
+    ]
+    assert section.stacks[1].containers[1].problems == ["unhealthy"]
 
 
 @pytest.mark.parametrize(
@@ -328,12 +367,41 @@ def network(snap: Snapshot, now: datetime = NOW) -> Any:
     )
 
 
+def tv_json(section: Any) -> str:
+    """What the TV payload carries of the network section: no device list, no MAC address."""
+    return section.model_dump_json(exclude={"devices", "offline_devices", "all_findings"})
+
+
+def test_the_network_section_keeps_the_full_device_list_for_the_detail_page() -> None:
+    snap = snapshot()
+    snap.devices.append(snap.devices[0].model_copy(update={"ip": "192.168.1.10", "mac": "aa:aa"}))
+    snap.devices[0].ports = [Port(port=8001), Port(port=23)]
+    unidentified = offline_device(None, "unknown", 3, ip="192.168.1.104")
+    unidentified.vendor = None
+    snap.offline_devices = [unidentified]
+
+    section = network(snap)
+
+    assert [d.ip for d in section.devices] == ["192.168.1.9", "192.168.1.10", "192.168.1.50"]
+    first = section.devices[0]
+    assert (first.mac, first.name, first.open_ports, first.risky_ports) == (
+        MAC,
+        "name of 192.168.1.9",
+        [8001, 23],
+        [23],
+    )
+    assert [(d.ip, d.mac, d.last_seen_age_hours) for d in section.offline_devices] == [
+        ("192.168.1.104", "aa:bb:cc:00:00:60", 72.0)
+    ]
+    assert section.offline == []
+
+
 def test_the_network_section_counts_devices_without_listing_them() -> None:
     section = network(snapshot())
 
     assert (section.state, section.online, section.findings) == ("ok", 2, [])
     assert {(t.device_type, t.count) for t in section.by_type} == {("tv", 1), ("printer", 1)}
-    dumped = section.model_dump_json()
+    dumped = tv_json(section)
     assert MAC not in dumped
     assert "name of" not in dumped
 
@@ -341,7 +409,7 @@ def test_the_network_section_counts_devices_without_listing_them() -> None:
 def test_network_findings_set_the_state_and_info_ones_are_not_listed() -> None:
     info = Finding(kind="new_device", severity="info", ip="192.168.1.60", detail="A new camera.")
     warning = Finding(
-        kind="risky_ports", severity="warning", ip="192.168.1.77", mac=MAC, detail="Telnet is open."
+        kind="duplicate_mac", severity="warning", ip="192.168.1.77", mac=MAC, detail="Twice."
     )
     alert = Finding(
         kind="gateway_mac_changed", severity="alert", ip="192.168.1.1", detail="Changed."
@@ -350,9 +418,26 @@ def test_network_findings_set_the_state_and_info_ones_are_not_listed() -> None:
     assert network(snapshot(info)).state == "ok"
     assert network(snapshot(info)).new_devices == 1
     section = network(snapshot(info, warning))
-    assert (section.state, [f.kind for f in section.findings]) == ("warning", ["risky_ports"])
+    assert (section.state, [f.kind for f in section.findings]) == ("warning", ["duplicate_mac"])
     assert network(snapshot(info, warning, alert)).state == "error"
-    assert MAC not in network(snapshot(warning)).model_dump_json()
+    assert MAC not in tv_json(network(snapshot(warning)))
+
+
+def test_risky_ports_are_listed_with_the_device_but_never_change_the_state() -> None:
+    risky = Finding(
+        kind="risky_ports", severity="warning", ip="192.168.1.9", mac=MAC, detail="Telnet is open."
+    )
+    snap = snapshot(risky)
+    snap.devices[0].ports = [Port(port=8001), Port(port=23), Port(port=5900)]
+
+    section = network(snap)
+
+    assert section.state == "ok"
+    assert section.findings == []
+    assert [(r.name, r.ip, r.ports) for r in section.risky_devices] == [
+        ("name of 192.168.1.9", "192.168.1.9", [23, 5900])
+    ]
+    assert MAC not in tv_json(section)
 
 
 def test_an_old_scan_is_a_warning_and_a_missing_one_is_unavailable() -> None:
@@ -395,7 +480,22 @@ def test_devices_that_went_away_are_listed_by_name_without_phones_or_macs() -> N
         ("Impressora da sala", "printer", 48.0),
         ("Espressif Inc.", "smart_home", 12.0),
     ]
-    assert "aa:bb:cc" not in section.model_dump_json()
+    assert "aa:bb:cc" not in tv_json(section)
+
+
+def test_unidentified_offline_devices_are_scanner_noise_and_are_not_listed() -> None:
+    bare = offline_device(None, "unknown", 1, ip="192.168.1.104")
+    default_hostname = offline_device(None, "unknown", 1, ip="192.168.1.101")
+    bare.vendor = default_hostname.vendor = None
+    default_hostname.hostname = "wlan0"
+    named = offline_device("Câmera da garagem", "unknown", 3)
+    vendor_only = offline_device(None, "unknown", 4)
+    snap = snapshot()
+    snap.offline_devices = [bare, default_hostname, named, vendor_only]
+
+    names = [o.name for o in network(snap).offline]
+
+    assert names == ["Câmera da garagem", "Espressif Inc."]
 
 
 def test_only_a_few_offline_devices_are_kept() -> None:
@@ -862,6 +962,10 @@ async def test_the_page_and_its_assets_are_served_with_a_strict_policy(
         ("/", "text/html"),
         ("/app.css", "text/css"),
         ("/app.js", "text/javascript"),
+        ("/containers", "text/html"),
+        ("/network", "text/html"),
+        ("/detail.css", "text/css"),
+        ("/detail.js", "text/javascript"),
     ]:
         response = web.get(path)
         assert response.status_code == 200
@@ -899,6 +1003,35 @@ async def test_the_status_api_has_the_four_sections_and_the_age(
     assert (body["overall"], body["age_seconds"], body["stale"]) == ("ok", 0, False)
     assert body["containers"]["running"] == 2
     assert response.headers["cache-control"] == "no-store"
+
+
+async def test_the_containers_api_carries_the_stacks_and_the_tv_payload_does_not(
+    tmp_path: Path, sources: None
+) -> None:
+    web = client(await ready(tmp_path))
+
+    body = web.get("/api/containers").json()
+
+    assert body["stale"] is False
+    assert [s["name"] for s in body["stacks"]] == ["media"]
+    assert [c["name"] for c in body["stacks"][0]["containers"]] == ["plex", "sonarr"]
+    assert "stacks" not in web.get("/api/status").json()["containers"]
+
+
+async def test_the_network_api_has_the_devices_with_their_mac_and_the_tv_payload_does_not(
+    tmp_path: Path, sources: None
+) -> None:
+    web = client(await ready(tmp_path))
+
+    body = web.get("/api/network").json()
+
+    assert [(d["ip"], d["mac"]) for d in body["devices"]] == [
+        ("192.168.1.9", MAC),
+        ("192.168.1.50", "00:1b:a9:00:00:50"),
+    ]
+    assert body["stale"] is False
+    status = web.get("/api/status").json()["network"]
+    assert not {"devices", "offline_devices", "all_findings"} & set(status)
 
 
 async def test_the_api_says_when_it_has_not_collected_anything_yet(tmp_path: Path) -> None:
@@ -954,10 +1087,11 @@ async def test_only_reading_is_allowed_and_unknown_paths_are_not_found(
 
 def test_the_page_runs_no_inline_code_and_never_builds_markup_from_data() -> None:
     root = resources.files("server_copilot").joinpath("assets", "dashboard")
-    html = root.joinpath("index.html").read_text("utf-8")
-    script = root.joinpath("app.js").read_text("utf-8")
+    pages = {"index.html": "app.js", "containers.html": "detail.js", "network.html": "detail.js"}
+    html = "".join(root.joinpath(name).read_text("utf-8") for name in pages)
+    script = "".join(root.joinpath(name).read_text("utf-8") for name in set(pages.values()))
 
-    assert re.findall(r"<script[^>]*>", html) == ['<script src="/app.js">']
+    assert re.findall(r"<script[^>]*>", html) == [f'<script src="/{n}">' for n in pages.values()]
     assert "<style" not in html
     assert re.search(r"\son\w+=", html) is None
     for forbidden in (

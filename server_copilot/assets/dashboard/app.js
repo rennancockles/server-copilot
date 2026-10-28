@@ -33,9 +33,9 @@
   var FINDINGS = {
     new_device: "Novo dispositivo",
     gateway_mac_changed: "MAC do roteador mudou",
-    duplicate_mac: "MAC duplicado",
-    risky_ports: "Portas de risco"
+    duplicate_mac: "MAC duplicado"
   };
+  var RISKY_PORTS = { 21: "FTP", 23: "Telnet", 2375: "API do Docker", 3389: "Área remota", 5900: "VNC" };
   var CHECKS = { ok: "ok", warning: "atrasado", error: "falhou" };
 
   var lastOk = 0;
@@ -211,7 +211,16 @@
     }
     updates.recent.forEach(function (u, index) {
       var info = UPDATE_STATUS[u.status] || [u.status, ""];
-      var line = item((u.project || "?") + "  ·  " + info[0], age(u.age_hours), info[1]);
+      var line = item("", age(u.age_hours), info[1]);
+      var name = line.firstChild;
+      if (u.project) {
+        var link = el("a", "", u.project);
+        link.href = "/containers#" + encodeURIComponent(u.project);
+        name.appendChild(link);
+      } else {
+        name.appendChild(document.createTextNode("?"));
+      }
+      name.appendChild(document.createTextNode("  ·  " + info[0]));
       block.appendChild(index > 0 ? droppable(line, 35 + index) : line);
     });
     body.appendChild(droppable(block, 34));
@@ -339,6 +348,16 @@
         list.appendChild(index > 0 ? droppable(node, 30 + index) : node);
       });
       body.appendChild(list);
+    }
+    if (section.risky_devices.length > 0) {
+      var risky = el("div", "list");
+      risky.appendChild(el("h3", "", "Portas de risco abertas"));
+      section.risky_devices.slice(0, 3).forEach(function (d, index) {
+        var ports = d.ports.map(function (p) { return (RISKY_PORTS[p] || "porta") + " " + p; }).join(", ");
+        var line = item(d.name + "  ·  " + d.ip, ports);
+        risky.appendChild(index > 0 ? droppable(line, 46 + index) : line);
+      });
+      body.appendChild(droppable(risky, 46));
     }
     if (section.offline.length > 0) {
       var away = el("div", "list");

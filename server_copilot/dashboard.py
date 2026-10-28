@@ -8,11 +8,12 @@ memory, so opening the page (or leaving it open on a TV) costs the server nothin
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from importlib import resources
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
 import uvicorn
 from pydantic import BaseModel, Field
@@ -30,6 +31,7 @@ from server_copilot.docker import DockerClient, DockerError
 from server_copilot.docker_usage import DockerDiskUsage, fetch_docker_disk_usage
 from server_copilot.host import HostMetrics, collect_host_metrics, parse_disks
 from server_copilot.network import NetworkDevices, list_devices, unknown_devices
+from server_copilot.network_scan import RISKY_PORTS
 from server_copilot.network_snapshot import read_snapshot
 from server_copilot.stats import StatsOverview, fetch_stats_overview
 
@@ -58,6 +60,10 @@ ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/containers": ("containers.html", "text/html; charset=utf-8"),
+    "/network": ("network.html", "text/html; charset=utf-8"),
+    "/detail.css": ("detail.css", "text/css; charset=utf-8"),
+    "/detail.js": ("detail.js", "text/javascript; charset=utf-8"),
 }
 # The page loads nothing from anywhere but itself and runs no inline script, so a name taken from
 # a container or a device can never become markup.
@@ -109,6 +115,24 @@ class ConsumerRow(BaseModel):
     memory_percent: float
 
 
+class StackContainer(BaseModel):
+    name: str
+    service: str | None
+    image: str
+    state: str
+    status: str
+    cpu_percent: float | None
+    memory_usage_bytes: int | None
+    problems: list[str]
+
+
+class StackRow(BaseModel):
+    name: str | None
+    state: State
+    running: int
+    containers: list[StackContainer]
+
+
 class ContainersSection(_Section):
     total: int = 0
     running: int = 0
@@ -116,6 +140,7 @@ class ContainersSection(_Section):
     problems: list[ProblemRow] = Field(default_factory=list)
     top_cpu: list[ConsumerRow] = Field(default_factory=list)
     top_memory: list[ConsumerRow] = Field(default_factory=list)
+    stacks: list[StackRow] = Field(default_factory=list)
 
 
 class RepositoryRow(BaseModel):
@@ -154,14 +179,48 @@ class OfflineRow(BaseModel):
     age_hours: float | None
 
 
+class RiskyDeviceRow(BaseModel):
+    name: str
+    ip: str
+    ports: list[int]
+
+
+class DeviceDetail(BaseModel):
+    name: str | None
+    ip: str
+    mac: str | None
+    vendor: str | None
+    device_type: str
+    open_ports: list[int]
+    risky_ports: list[int]
+    is_gateway: bool
+    is_new: bool
+    first_seen: str
+
+
+class OfflineDetail(BaseModel):
+    name: str | None
+    ip: str | None
+    mac: str | None
+    vendor: str | None
+    device_type: str
+    first_seen: str
+    last_seen_age_hours: float | None
+
+
 class NetworkSection(_Section):
     online: int = 0
     new_devices: int = 0
     stale: bool = False
     by_type: list[TypeRow] = Field(default_factory=list)
     findings: list[FindingRow] = Field(default_factory=list)
+    risky_devices: list[RiskyDeviceRow] = Field(default_factory=list)
     offline: list[OfflineRow] = Field(default_factory=list)
     age_minutes: float | None = None
+    # Only for the /network page: the TV payload leaves these (and every MAC address) out.
+    devices: list[DeviceDetail] = Field(default_factory=list)
+    offline_devices: list[OfflineDetail] = Field(default_factory=list)
+    all_findings: list[FindingRow] = Field(default_factory=list)
 
 
 class UsageRow(BaseModel):
@@ -219,11 +278,34 @@ def overall_state(sections: list[State]) -> State:
 # --- one section each -----------------------------------------------------------------------
 
 
-def host_section(metrics: HostMetrics) -> HostSection:
-    disks = [
-        DiskRow(name=d.name, percent=d.percent, used_bytes=d.used_bytes, total_bytes=d.total_bytes)
-        for d in metrics.disks
-    ]
+def _disk_rows(metrics: HostMetrics, devices: dict[str, int]) -> list[DiskRow]:
+    """One row per filesystem: mounts of the same one (by device id) are shown together."""
+    rows: list[DiskRow] = []
+    seen: dict[int, DiskRow] = {}
+    for d in metrics.disks:
+        device = devices.get(d.name)
+        if device is not None and device in seen:
+            seen[device].name += f" / {d.name}"
+            continue
+        row = DiskRow(
+            name=d.name, percent=d.percent, used_bytes=d.used_bytes, total_bytes=d.total_bytes
+        )
+        rows.append(row)
+        if device is not None:
+            seen[device] = row
+    return rows
+
+
+def _device_ids(disks: dict[str, str]) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    for name, path in disks.items():
+        with suppress(OSError):
+            ids[name] = os.stat(path).st_dev
+    return ids
+
+
+def host_section(metrics: HostMetrics, devices: dict[str, int] | None = None) -> HostSection:
+    disks = _disk_rows(metrics, devices or {})
     states: list[State] = [_level(d.percent, DISK_WARNING, DISK_ERROR) for d in disks]
     states.append(_level(metrics.memory.percent, MEMORY_WARNING, MEMORY_ERROR))
     return HostSection(
@@ -247,6 +329,35 @@ def _consumer(name: str, cpu: float, memory: int, memory_percent: float) -> Cons
     )
 
 
+def _stacks(
+    listed: list[ContainerSummary], problems: dict[str, list[str]], overview: StatsOverview
+) -> list[StackRow]:
+    """The containers grouped by compose project; the ones outside any stack go last."""
+    usage = {s.name: s for s in overview.containers}
+    groups: dict[str | None, list[StackContainer]] = {}
+    for c in sorted(listed, key=lambda c: (c.compose_service or c.name, c.name)):
+        stat = usage.get(c.name)
+        groups.setdefault(c.compose_project, []).append(
+            StackContainer(
+                name=c.name,
+                service=c.compose_service,
+                image=c.image,
+                state=c.state,
+                status=c.status,
+                cpu_percent=stat.cpu_percent if stat else None,
+                memory_usage_bytes=stat.memory_usage_bytes if stat else None,
+                problems=problems.get(c.name, []),
+            )
+        )
+    rows = []
+    for name, containers in groups.items():
+        kinds = {k for c in containers for k in c.problems}
+        state: State = "error" if kinds & SEVERE_PROBLEMS else "warning" if kinds else "ok"
+        running = sum(c.state == "running" for c in containers)
+        rows.append(StackRow(name=name, state=state, running=running, containers=containers))
+    return sorted(rows, key=lambda r: (r.name is None, r.name or ""))
+
+
 def containers_section(
     listed: list[ContainerSummary], report: ProblemReport, overview: StatsOverview
 ) -> ContainersSection:
@@ -268,6 +379,7 @@ def containers_section(
         problems=problems,
         top_cpu=sorted(consumers, key=lambda c: -c.cpu_percent)[:TOP_CONSUMERS],
         top_memory=sorted(consumers, key=lambda c: -c.memory_usage_bytes)[:TOP_CONSUMERS],
+        stacks=_stacks(listed, {p.name: p.problems for p in problems}, overview),
     )
 
 
@@ -311,7 +423,11 @@ def _hours_since(moment: str | None, now: datetime) -> float | None:
 
 
 def _offline_rows(result: NetworkDevices, now: datetime) -> list[OfflineRow]:
-    """Known devices missing from the last scan, without phones and tablets, which come and go."""
+    """Known devices missing from the last scan, worth a glance on the TV.
+
+    Phones and tablets come and go, and a device of unknown type with neither a name nor a vendor
+    (only an IP or a default hostname like ``wlan0``) is scanner noise, not something to miss.
+    """
     rows = [
         OfflineRow(
             name=d.name or d.hostname or d.vendor or d.ip or "dispositivo",
@@ -319,19 +435,75 @@ def _offline_rows(result: NetworkDevices, now: datetime) -> list[OfflineRow]:
             age_hours=_hours_since(d.last_seen, now),
         )
         for d in result.offline_devices
-        if d.device_type != "phone_or_tablet"
+        if d.device_type != "phone_or_tablet" and (d.device_type != "unknown" or d.name or d.vendor)
     ]
     return rows[:OFFLINE_SHOWN]
 
 
+def _ip_key(ip: str | None) -> tuple[int, ...]:
+    try:
+        return tuple(int(part) for part in (ip or "").split("."))
+    except ValueError:
+        return (999,)
+
+
+def _device_details(result: NetworkDevices) -> list[DeviceDetail]:
+    return [
+        DeviceDetail(
+            name=d.name or d.hostname,
+            ip=d.ip,
+            mac=d.mac,
+            vendor=d.vendor,
+            device_type=d.device_type,
+            open_ports=d.open_ports,
+            risky_ports=[p for p in d.open_ports if p in RISKY_PORTS],
+            is_gateway=d.is_gateway,
+            is_new=d.is_new,
+            first_seen=d.first_seen,
+        )
+        for d in sorted(result.devices, key=lambda d: _ip_key(d.ip))
+    ]
+
+
+def _offline_details(result: NetworkDevices, now: datetime) -> list[OfflineDetail]:
+    return [
+        OfflineDetail(
+            name=d.name or d.hostname,
+            ip=d.ip,
+            mac=d.mac,
+            vendor=d.vendor,
+            device_type=d.device_type,
+            first_seen=d.first_seen,
+            last_seen_age_hours=_hours_since(d.last_seen, now),
+        )
+        for d in sorted(result.offline_devices, key=lambda d: _ip_key(d.ip))
+    ]
+
+
+def _risky_devices(result: NetworkDevices) -> list[RiskyDeviceRow]:
+    return [
+        RiskyDeviceRow(
+            name=d.name or d.hostname or d.vendor or d.ip,
+            ip=d.ip,
+            ports=[p for p in d.open_ports if p in RISKY_PORTS],
+        )
+        for d in result.devices
+        if any(p in RISKY_PORTS for p in d.open_ports)
+    ]
+
+
 def network_section(result: NetworkDevices, now: datetime) -> NetworkSection:
-    """Counts, findings and names of devices that went away: no MAC addresses."""
+    """Counts, findings and names of devices that went away: no MAC addresses.
+
+    Risky open ports are listed but never change the state: they are often not fixable, and a page
+    that can never turn green stops being read.
+    """
     if result.status == "unknown":
         return NetworkSection(note=result.summary)
     findings = [
         FindingRow(kind=f.kind, severity=f.severity, ip=f.ip, detail=f.detail)
         for f in result.findings
-        if f.severity != "info"
+        if f.severity != "info" and f.kind != "risky_ports"
     ]
     state: State = "ok"
     if result.status == "stale" or any(f.severity == "warning" for f in findings):
@@ -344,9 +516,16 @@ def network_section(result: NetworkDevices, now: datetime) -> NetworkSection:
         new_devices=sum(f.kind == "new_device" for f in result.findings),
         by_type=[TypeRow(device_type=c.device_type, count=c.count) for c in result.counts],
         findings=findings,
+        risky_devices=_risky_devices(result),
         offline=_offline_rows(result, now),
         stale=result.status == "stale",
         age_minutes=result.age_minutes,
+        devices=_device_details(result),
+        offline_devices=_offline_details(result, now),
+        all_findings=[
+            FindingRow(kind=f.kind, severity=f.severity, ip=f.ip, detail=f.detail)
+            for f in result.findings
+        ],
     )
 
 
@@ -424,7 +603,11 @@ class Dashboard:
             return empty(note="Não foi possível ler.")
 
     async def _host(self) -> HostSection:
-        return host_section(await asyncio.to_thread(collect_host_metrics, self.disks))
+        metrics, devices = await asyncio.gather(
+            asyncio.to_thread(collect_host_metrics, self.disks),
+            asyncio.to_thread(_device_ids, self.disks),
+        )
+        return host_section(metrics, devices)
 
     async def _containers(self) -> ContainersSection:
         listed, report, overview = await asyncio.gather(
@@ -522,19 +705,57 @@ def create_dashboard_app(dashboard: Dashboard, *, refresh_in_background: bool = 
 
         return handler
 
-    async def api_status(_: Request) -> Response:
-        if dashboard.status is None:
-            return JSONResponse(
-                {"overall": "unavailable", "starting": True},
-                status_code=503,
-                headers=SECURITY_HEADERS,
+    def answer(body_of: Callable[[DashboardStatus], dict[str, Any]]) -> Callable[..., Any]:
+        async def handler(_: Request) -> Response:
+            if dashboard.status is None:
+                return JSONResponse(
+                    {"overall": "unavailable", "starting": True},
+                    status_code=503,
+                    headers=SECURITY_HEADERS,
+                )
+            body = body_of(dashboard.status)
+            body["age_seconds"] = dashboard.age_seconds()
+            body["stale"] = (dashboard.age_seconds() or 0) > (
+                dashboard.settings.dashboard_refresh_seconds * STALE_AFTER_REFRESHES
             )
-        body = dashboard.status.model_dump()
-        body["age_seconds"] = dashboard.age_seconds()
-        body["stale"] = (dashboard.age_seconds() or 0) > (
-            dashboard.settings.dashboard_refresh_seconds * STALE_AFTER_REFRESHES
+            return JSONResponse(body, headers=SECURITY_HEADERS)
+
+        return handler
+
+    # The TV payload stays small and carries only what the TV shows; the detail pages ask for more.
+    api_status = answer(
+        lambda status: status.model_dump(
+            exclude={
+                "containers": {"stacks"},
+                "network": {"devices", "offline_devices", "all_findings"},
+            }
         )
-        return JSONResponse(body, headers=SECURITY_HEADERS)
+    )
+    api_network = answer(
+        lambda status: {
+            "overall": status.overall,
+            **status.network.model_dump(
+                include={
+                    "state",
+                    "note",
+                    "online",
+                    "stale",
+                    "age_minutes",
+                    "devices",
+                    "offline_devices",
+                    "all_findings",
+                }
+            ),
+        }
+    )
+    api_containers = answer(
+        lambda status: {
+            "overall": status.overall,
+            "state": status.containers.state,
+            "note": status.containers.note,
+            "stacks": [row.model_dump() for row in status.containers.stacks],
+        }
+    )
 
     async def health(_: Request) -> Response:
         return JSONResponse({"status": "ok"}, headers=SECURITY_HEADERS)
@@ -557,6 +778,8 @@ def create_dashboard_app(dashboard: Dashboard, *, refresh_in_background: bool = 
     routes = [Route(path, page(path)) for path in ASSETS]
     routes += [
         Route("/api/status", api_status),
+        Route("/api/containers", api_containers),
+        Route("/api/network", api_network),
         Route("/health", health),
         Route("/favicon.ico", no_icon),
     ]

@@ -459,12 +459,21 @@ Docker uses and could give back, the latest stack updates, uptime), **Containers
 total, the ones with problems, the busiest by CPU and memory), **Backup** (last backup and how long
 it took, snapshot age and size of each repository, free space on the Drive, the weekly check and the
 restore test) and **Rede** (devices online by type, new devices, known devices that went away, and
-the scanner's findings). The text of the page is in Portuguese.
+the scanner's findings). Risky open ports (FTP, Telnet, RDP, VNC, the Docker API) are listed with the
+device and the port, but never change the colour of the page: they are often not fixable, and a page
+that can never turn green stops being read. The text of the page is in Portuguese.
+
+The TV page has no room for lists, so it links to detail pages that scroll and are meant for a
+laptop or a phone: `/containers` lists every container grouped by compose stack (image, state, CPU,
+memory and problems), and the project name in **Últimos updates** opens its stack; `/network` lists
+every device with name, IP, MAC address, maker, type, open ports (risky ones highlighted) and since
+when it has been seen, plus the devices that went away.
 
 It is a separate process of the same image, never part of the MCP server. The MCP is reachable from the
 Internet through the tunnel; this page is not meant to be, and it has **no login**, so keep it off the
 `edge` network and out of the tunnel: anyone on your LAN (a guest on your Wi-Fi included) can open it.
-It only reads, shows no secret, log, path or MAC address, and answers `GET` only.
+It only reads, shows no secret, log or path, and answers `GET` only. The TV page shows no MAC
+address; the `/network` page does, so anyone who can open the dashboard can read the MACs of your LAN.
 
 ```yaml
 server-copilot-dashboard:
@@ -507,7 +516,7 @@ refreshing.
   tool `get_docker_disk_usage` needs it too). The updates come from the same two folders as the MCP's
   update tools, mounted read-only; leave them out and that block is simply not shown. The list of
   devices that went away leaves out phones and tablets, which come and go with their owners, and shows
-  names only, never MAC addresses.
+  names only on the TV page (the `/network` page lists them all, with MAC addresses).
 - **Small screens:** each panel shows what fits and drops the least important lines first (the extra
   Docker details, the uptime, the older updates, the second list of consumers...), so nothing is ever
   cut in half; on a TV there is room for all of it.
