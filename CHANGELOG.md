@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.11.0 (2026-10-28)
+
+### Features
+
+- Add Compose update tools that queue requests for a host runner
+  ([`92f7f72`](https://github.com/rennancockles/server-copilot/commit/92f7f728f11e38604dff572b2a7f3604b6141d40))
+
+
 ## v0.10.0 (2026-10-28)
 
 ### Chores
