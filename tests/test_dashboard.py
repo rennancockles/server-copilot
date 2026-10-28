@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 
 from server_copilot import dashboard
 from server_copilot.backup import RawStatusFile, evaluate, unknown_status
+from server_copilot.compose_update import UpdateResult, UpdateStatus
 from server_copilot.config import Settings
 from server_copilot.containers import ContainerSummary
 from server_copilot.dashboard import (
@@ -21,12 +22,15 @@ from server_copilot.dashboard import (
     backup_section,
     containers_section,
     create_dashboard_app,
+    docker_section,
     host_section,
     network_section,
     overall_state,
+    updates_section,
 )
 from server_copilot.diagnostics import ProblemContainer, ProblemKind, ProblemReport
 from server_copilot.docker import DockerClient, DockerError
+from server_copilot.docker_usage import DockerDiskUsage, UsageSummary
 from server_copilot.host import (
     CpuMetrics,
     DiskError,
@@ -40,6 +44,7 @@ from server_copilot.network_snapshot import (
     Device,
     DeviceType,
     Finding,
+    OfflineDevice,
     Port,
     ScanInfo,
     ScannedNetwork,
@@ -319,7 +324,7 @@ def test_a_failed_backup_is_an_error_and_unknown_data_is_unavailable() -> None:
 
 def network(snap: Snapshot, now: datetime = NOW) -> Any:
     return network_section(
-        list_devices(snap, now, device_type=None, query=None, include_offline=False)
+        list_devices(snap, now, device_type=None, query=None, include_offline=True), now
     )
 
 
@@ -354,13 +359,171 @@ def test_an_old_scan_is_a_warning_and_a_missing_one_is_unavailable() -> None:
     old = snapshot(generated=NOW - timedelta(hours=2))
 
     assert network(old).state == "warning"
-    assert "scanner may have stopped" in (network(old).note or "")
-    missing = network_section(unknown_devices("No network scan exists yet."))
+    assert network(old).stale is True
+    assert network(snapshot()).stale is False
+    missing = network_section(unknown_devices("No network scan exists yet."), NOW)
     assert (missing.state, missing.note, missing.online) == (
         "unavailable",
         "No network scan exists yet.",
         0,
     )
+
+
+def offline_device(name: str | None, kind: str, days: float, ip: str = "192.168.1.60") -> Any:
+    return OfflineDevice(
+        ip=ip,
+        mac="aa:bb:cc:00:00:60",
+        vendor="Espressif Inc.",
+        name=name,
+        device_type=cast(DeviceType, kind),
+        first_seen=NOW - timedelta(days=60),
+        last_seen=NOW - timedelta(days=days),
+    )
+
+
+def test_devices_that_went_away_are_listed_by_name_without_phones_or_macs() -> None:
+    snap = snapshot()
+    snap.offline_devices = [
+        offline_device("Impressora da sala", "printer", 2),
+        offline_device("iPhone de visita", "phone_or_tablet", 1),
+        offline_device(None, "smart_home", 0.5),
+    ]
+
+    section = network(snap)
+
+    assert [(o.name, o.device_type, o.age_hours) for o in section.offline] == [
+        ("Impressora da sala", "printer", 48.0),
+        ("Espressif Inc.", "smart_home", 12.0),
+    ]
+    assert "aa:bb:cc" not in section.model_dump_json()
+
+
+def test_only_a_few_offline_devices_are_kept() -> None:
+    snap = snapshot()
+    snap.offline_devices = [offline_device(f"device {n}", "camera", n) for n in range(1, 12)]
+
+    assert len(network(snap).offline) == dashboard.OFFLINE_SHOWN
+
+
+def test_new_devices_are_counted_from_the_findings() -> None:
+    new = Finding(kind="new_device", severity="info", ip="192.168.1.60", detail="A new camera.")
+    other = Finding(kind="new_device", severity="warning", ip="192.168.1.61", detail="Unknown.")
+
+    assert network(snapshot(new, other)).new_devices == 2
+
+
+def usage(total: int, reclaimable: int) -> UsageSummary:
+    return UsageSummary(count=1, size_bytes=total, reclaimable_bytes=reclaimable)
+
+
+def disk_usage() -> DockerDiskUsage:
+    return DockerDiskUsage(
+        images=usage(30 * 2**30, 8 * 2**30),
+        containers=usage(2**20, 0),
+        volumes=usage(5 * 2**30, 2 * 2**30),
+        build_cache=usage(2**30, 2**30),
+        total_bytes=36 * 2**30 + 2**20,
+        reclaimable_bytes=11 * 2**30,
+        cleanup_candidates=[],
+        candidates_not_shown=0,
+        notes=[],
+    )
+
+
+def test_the_docker_section_reports_use_and_what_could_be_reclaimed() -> None:
+    section = docker_section(disk_usage())
+
+    assert section.state == "ok"
+    assert (section.total_bytes, section.reclaimable_bytes) == (36 * 2**30 + 2**20, 11 * 2**30)
+    assert [(p.name, p.size_bytes, p.reclaimable_bytes) for p in section.parts] == [
+        ("images", 30 * 2**30, 8 * 2**30),
+        ("volumes", 5 * 2**30, 2 * 2**30),
+        ("build_cache", 2**30, 2**30),
+    ]
+
+
+def update_result(
+    project: str | None, status: str, hours: float | None, failed_step: str | None = None
+) -> UpdateResult:
+    moment = None if hours is None else (NOW - timedelta(hours=hours)).isoformat()
+    return UpdateResult(
+        request_id="a" * 32,
+        project=project,
+        services=[],
+        status=cast(Any, status),
+        summary="",
+        requested_at=moment,
+        started_at=moment,
+        finished_at=moment if status in ("succeeded", "failed", "rejected") else None,
+        failed_step=failed_step,
+        steps=[],
+        containers=[],
+        output_tail="",
+        notes=[],
+    )
+
+
+def updates(*results: UpdateResult) -> UpdateStatus:
+    return UpdateStatus(updates=list(results), notes=[])
+
+
+def test_recent_updates_are_listed_newest_first_and_a_good_one_is_ok() -> None:
+    section = updates_section(
+        updates(
+            update_result("media", "succeeded", 3),
+            update_result("kanbai_server", "succeeded", 30),
+            update_result("tools", "succeeded", 50),
+            update_result("finsight", "succeeded", 90),
+        ),
+        NOW,
+    )
+
+    assert section.state == "ok"
+    assert [(r.project, r.status, r.age_hours) for r in section.recent] == [
+        ("media", "succeeded", 3.0),
+        ("kanbai_server", "succeeded", 30.0),
+        ("tools", "succeeded", 50.0),
+    ]
+    assert section.waiting == 0
+
+
+def test_a_failed_update_in_the_last_day_is_a_warning_and_an_old_one_is_not() -> None:
+    fresh = updates_section(updates(update_result("media", "failed", 5, "pull")), NOW)
+    rejected = updates_section(updates(update_result("infra", "rejected", 1)), NOW)
+    old = updates_section(updates(update_result("media", "failed", 72, "pull")), NOW)
+
+    assert fresh.state == "warning"
+    assert fresh.recent[0].failed_step == "pull"
+    assert rejected.state == "warning"
+    assert old.state == "ok"
+    assert old.recent[0].status == "failed"
+
+
+def test_updates_waiting_or_running_are_counted_and_a_missing_time_is_tolerated() -> None:
+    section = updates_section(
+        updates(
+            update_result("media", "queued", 0.1),
+            update_result("tools", "running", 0.2),
+            update_result(None, "succeeded", None),
+        ),
+        NOW,
+    )
+
+    assert (section.state, section.waiting) == ("ok", 2)
+    assert section.recent[2].age_hours is None
+
+
+def test_ages_are_hours_and_unreadable_times_are_tolerated() -> None:
+    assert dashboard._hours_since((NOW - timedelta(minutes=90)).isoformat(), NOW) == 1.5
+    assert dashboard._hours_since((NOW + timedelta(hours=2)).isoformat(), NOW) == 0.0
+    assert dashboard._hours_since("yesterday", NOW) is None
+    assert dashboard._hours_since(None, NOW) is None
+
+
+def test_no_update_yet_is_ok_and_empty() -> None:
+    section = updates_section(updates(), NOW)
+
+    assert (section.state, section.recent, section.waiting) == ("ok", [], 0)
 
 
 @pytest.mark.parametrize(
@@ -414,9 +577,13 @@ def sources(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fetch_stats_overview(docker: Any) -> StatsOverview:
         return overview(stats("plex", 20.0, 2**30), stats("sonarr", 2.0, 2**28))
 
+    async def fetch_docker_disk_usage(docker: Any, *, top: int) -> DockerDiskUsage:
+        return disk_usage()
+
     monkeypatch.setattr(dashboard, "fetch_containers", fetch_containers)
     monkeypatch.setattr(dashboard, "find_problems", find_problems)
     monkeypatch.setattr(dashboard, "fetch_stats_overview", fetch_stats_overview)
+    monkeypatch.setattr(dashboard, "fetch_docker_disk_usage", fetch_docker_disk_usage)
     monkeypatch.setattr(dashboard, "collect_host_metrics", lambda disks: host_metrics())
 
 
@@ -430,16 +597,115 @@ async def test_everything_readable_gives_an_ok_status(tmp_path: Path, sources: N
     status = await board.collect()
 
     assert status.overall == "ok"
-    assert [s.state for s in (status.host, status.containers, status.backup, status.network)] == [
-        "ok",
-        "ok",
-        "ok",
-        "ok",
-    ]
+    sections = (status.host, status.docker, status.containers, status.backup, status.network)
+    assert [s.state for s in sections] == ["ok"] * 5
     assert status.generated_at == "2026-10-28T12:00:00+00:00"
     assert status.refresh_seconds == 30
     assert (status.containers.running, status.network.online) == (2, 2)
     assert status.containers.top_cpu[0].name == "plex"
+    assert status.docker.reclaimable_bytes == 11 * 2**30
+    assert (status.backup.last_duration_seconds, status.backup.repositories[0].size_bytes) == (
+        48,
+        8,
+    )
+
+
+async def test_updates_are_unavailable_until_the_folders_are_configured(
+    tmp_path: Path, sources: None
+) -> None:
+    status = await make_dashboard(tmp_path).collect()
+
+    assert (status.updates.state, status.updates.note) == (
+        "unavailable",
+        "Os updates não estão configurados.",
+    )
+    assert status.overall == "ok"
+
+
+def configured_updates(tmp_path: Path) -> dict[str, Any]:
+    requests, results = tmp_path / "requests", tmp_path / "results"
+    requests.mkdir()
+    results.mkdir()
+    return {"update_requests_dir": str(requests), "update_results_dir": str(results)}
+
+
+def write_update_result(tmp_path: Path, status: str, hours: float) -> None:
+    moment = (NOW - timedelta(hours=hours)).isoformat()
+    document = {
+        "schema_version": 1,
+        "id": "a" * 32,
+        "project": "media",
+        "services": [],
+        "requested_at": moment,
+        "started_at": moment,
+        "finished_at": moment,
+        "status": status,
+        "failed_step": "pull" if status == "failed" else None,
+        "message": "",
+        "steps": [],
+        "containers": [],
+        "output_tail": "",
+    }
+    (tmp_path / "results" / f"{'a' * 32}.json").write_text(json.dumps(document))
+
+
+async def test_the_latest_updates_come_from_the_results_folder(
+    tmp_path: Path, sources: None
+) -> None:
+    board = make_dashboard(tmp_path, **configured_updates(tmp_path))
+    write_update_result(tmp_path, "succeeded", 4)
+
+    status = await board.collect()
+
+    assert status.updates.state == "ok"
+    assert [(r.project, r.status, r.age_hours) for r in status.updates.recent] == [
+        ("media", "succeeded", 4.0)
+    ]
+
+
+async def test_a_recent_failed_update_makes_the_whole_board_a_warning(
+    tmp_path: Path, sources: None
+) -> None:
+    board = make_dashboard(tmp_path, **configured_updates(tmp_path))
+    write_update_result(tmp_path, "failed", 2)
+
+    status = await board.collect()
+
+    assert status.updates.state == "warning"
+    assert status.overall == "warning"
+
+
+async def test_updates_folders_that_are_not_mounted_are_unavailable_with_the_reason(
+    tmp_path: Path, sources: None
+) -> None:
+    board = make_dashboard(
+        tmp_path,
+        update_requests_dir=str(tmp_path / "nope-requests"),
+        update_results_dir=str(tmp_path / "nope-results"),
+    )
+
+    status = await board.collect()
+
+    assert status.updates.state == "unavailable"
+    assert "not mounted" in (status.updates.note or "")
+
+
+async def test_the_docker_usage_failing_only_takes_out_its_own_section(
+    tmp_path: Path, sources: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(docker: Any, *, top: int) -> DockerDiskUsage:
+        raise DockerError("Enable SYSTEM=1 on the docker-socket-proxy.")
+
+    monkeypatch.setattr(dashboard, "fetch_docker_disk_usage", broken)
+
+    status = await make_dashboard(tmp_path).collect()
+
+    assert (status.docker.state, status.docker.note) == (
+        "unavailable",
+        "Enable SYSTEM=1 on the docker-socket-proxy.",
+    )
+    assert (status.host.state, status.containers.state) == ("ok", "ok")
+    assert status.overall == "ok"
 
 
 async def test_a_docker_failure_only_takes_out_the_containers_section(
@@ -474,7 +740,7 @@ async def test_a_section_that_hangs_is_cut_off(
     assert time.monotonic() - started < 3
     assert (status.containers.state, status.containers.note) == (
         "unavailable",
-        "It took too long to read.",
+        "Demorou demais para ler.",
     )
 
 
@@ -491,7 +757,7 @@ async def test_an_unexpected_error_is_logged_by_type_and_not_shown(
 
     status = await make_dashboard(tmp_path).collect()
 
-    assert (status.host.state, status.host.note) == ("unavailable", "It could not be read.")
+    assert (status.host.state, status.host.note) == ("unavailable", "Não foi possível ler.")
     assert "RuntimeError" in caplog.text
     assert "secret detail" not in caplog.text
     assert "secret detail" not in status.model_dump_json()
@@ -620,7 +886,16 @@ async def test_the_status_api_has_the_four_sections_and_the_age(
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) >= {"overall", "host", "containers", "backup", "network", "age_seconds"}
+    assert set(body) >= {
+        "overall",
+        "host",
+        "docker",
+        "updates",
+        "containers",
+        "backup",
+        "network",
+        "age_seconds",
+    }
     assert (body["overall"], body["age_seconds"], body["stale"]) == ("ok", 0, False)
     assert body["containers"]["running"] == 2
     assert response.headers["cache-control"] == "no-store"

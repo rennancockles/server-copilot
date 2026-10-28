@@ -454,11 +454,12 @@ All timestamps carry a timezone.
 ## Dashboard
 
 `server-copilot-dashboard` serves a page with the state of the server, made to be read from across the
-room on a TV and to open in any browser on the LAN: **Servidor** (CPU, memory, each disk, load,
-uptime), **Containers** (running of total, the ones with problems, the busiest by CPU and memory),
-**Backup** (last backup, snapshot ages, free space on the Drive, the weekly check and the restore test)
-and **Rede** (devices online by type, and the scanner's findings). The text of the page is in
-Portuguese.
+room on a TV and to open in any browser on the LAN: **Servidor** (CPU, memory, each disk, how much
+Docker uses and could give back, the latest stack updates, uptime), **Containers** (running of
+total, the ones with problems, the busiest by CPU and memory), **Backup** (last backup and how long
+it took, snapshot age and size of each repository, free space on the Drive, the weekly check and the
+restore test) and **Rede** (devices online by type, new devices, known devices that went away, and
+the scanner's findings). The text of the page is in Portuguese.
 
 It is a separate process of the same image, never part of the MCP server. The MCP is reachable from the
 Internet through the tunnel; this page is not meant to be, and it has **no login**, so keep it off the
@@ -475,12 +476,16 @@ server-copilot-dashboard:
     SERVER_COPILOT_HOST_DISKS: root=/host/root
     SERVER_COPILOT_BACKUP_STATUS_FILE: /host/backup-status/backup-status.json
     SERVER_COPILOT_NETWORK_SCAN_FILE: /var/lib/server-copilot-network/scan.json
+    SERVER_COPILOT_UPDATE_REQUESTS_DIR: /updates/requests   # optional: the latest updates
+    SERVER_COPILOT_UPDATE_RESULTS_DIR: /updates/results
   ports: ["8084:8081"]
   networks: [docker-api]          # Docker through the proxy; not the edge network
   volumes:                        # the same mounts as the MCP service, all read-only
     - /:/host/root:ro
     - /var/lib/home-server-infra-status:/host/backup-status:ro
     - network-scan:/var/lib/server-copilot-network:ro
+    - /var/lib/home-server-infra-update/requests:/updates/requests:ro
+    - /var/lib/home-server-infra-update/results:/updates/results:ro
   read_only: true
   cap_drop: [ALL]
 ```
@@ -496,7 +501,16 @@ refreshing.
 - **States:** a disk at 85% or memory at 90% is a warning, 95% and 97% an error; a container that is
   unhealthy, in a restart loop, OOM-killed or dead is an error, one that exited with an error a
   warning; the backup states are the ones of `get_backup_status`; scanner alerts are errors and its
-  warnings are warnings.
+  warnings are warnings; an update that failed or was refused in the last 24 hours is a warning (an
+  older one is only listed). Docker usage is information, and never changes the colour.
+- **What it needs:** the Docker figures come from `/system/df`, so the proxy needs `SYSTEM=1` (the MCP
+  tool `get_docker_disk_usage` needs it too). The updates come from the same two folders as the MCP's
+  update tools, mounted read-only; leave them out and that block is simply not shown. The list of
+  devices that went away leaves out phones and tablets, which come and go with their owners, and shows
+  names only, never MAC addresses.
+- **Small screens:** each panel shows what fits and drops the least important lines first (the extra
+  Docker details, the uptime, the older updates, the second list of consumers...), so nothing is ever
+  cut in half; on a TV there is room for all of it.
 - **OLED screens:** a page that never changes burns into the panel, so the page uses a black background
   and dim text, and drifts a few pixels every minute. Still, do not leave it on all day: close it (or
   turn the TV off) when nobody is looking.

@@ -60,7 +60,17 @@
     var gib = value / 1073741824;
     if (gib >= 1024) { return number(gib / 1024, 1) + " TB"; }
     if (gib >= 10) { return number(gib, 0) + " GB"; }
-    return number(gib, 1) + " GB";
+    if (gib >= 1) { return number(gib, 1) + " GB"; }
+    var mib = value / 1048576;
+    return mib >= 1 ? number(mib, 0) + " MB" : "< 1 MB";
+  }
+
+  function took(seconds) {
+    if (seconds === null || seconds === undefined) { return ""; }
+    if (seconds < 60) { return seconds + " s"; }
+    var minutes = Math.floor(seconds / 60);
+    var rest = seconds % 60;
+    return minutes + " min" + (rest ? " " + rest + " s" : "");
   }
 
   function duration(seconds) {
@@ -111,6 +121,49 @@
     return node;
   }
 
+  // Elements that can go when the panel is too small: the higher the number, the sooner it goes.
+  function droppable(node, priority) {
+    node.setAttribute("data-drop", String(priority));
+    return node;
+  }
+
+  // True when the last line of a panel ends below the panel's inner edge. It compares real positions
+  // instead of trusting scrollHeight, which a clipped flex box does not always report.
+  function overflows(body) {
+    if (body.scrollHeight > body.clientHeight + 1) { return true; }
+    var last = body.lastElementChild;
+    if (!last) { return false; }
+    var panelNode = body.parentNode;
+    var style = window.getComputedStyle(panelNode);
+    var inner = panelNode.getBoundingClientRect().bottom -
+      parseFloat(style.paddingBottom) - parseFloat(style.borderBottomWidth);
+    var limit = Math.min(body.getBoundingClientRect().bottom, inner);
+    return last.getBoundingClientRect().bottom > limit + 1;
+  }
+
+  function fit(body) {
+    var guard = 0;
+    while (overflows(body) && guard < 80) {
+      guard += 1;
+      var nodes = body.querySelectorAll("[data-drop]");
+      if (nodes.length === 0) { return; }
+      var top = -1;
+      var i;
+      for (i = 0; i < nodes.length; i++) {
+        top = Math.max(top, Number(nodes[i].getAttribute("data-drop")));
+      }
+      for (i = 0; i < nodes.length; i++) {
+        if (Number(nodes[i].getAttribute("data-drop")) === top && nodes[i].parentNode) {
+          nodes[i].parentNode.removeChild(nodes[i]);
+        }
+      }
+      var groups = body.querySelectorAll(".cols");
+      for (i = 0; i < groups.length; i++) {
+        if (!groups[i].querySelector(".item")) { groups[i].parentNode.removeChild(groups[i]); }
+      }
+    }
+  }
+
   function panel(id, section) {
     var node = document.getElementById(id);
     node.className = "panel s-" + section.state;
@@ -125,7 +178,46 @@
     if (reason) { body.appendChild(el("div", "sub", reason)); }
   }
 
-  function renderHost(section) {
+  var DOCKER_PARTS = { images: "imagens", volumes: "volumes", build_cache: "cache de build" };
+  var UPDATE_STATUS = {
+    succeeded: ["ok", ""],
+    failed: ["falhou", "bad"],
+    rejected: ["recusado", "bad"],
+    running: ["rodando", "warn"],
+    queued: ["na fila", "warn"]
+  };
+
+  function renderDocker(body, docker) {
+    if (!docker || docker.state === "unavailable") {
+      body.appendChild(droppable(row("Docker", "indisponível"), 48));
+      return;
+    }
+    body.appendChild(row("Docker",
+      bytes(docker.total_bytes) + " em uso  ·  " + bytes(docker.reclaimable_bytes) + " recuperáveis"));
+    docker.parts.forEach(function (part, index) {
+      var line = row(DOCKER_PARTS[part.name] || part.name,
+        bytes(part.size_bytes) + "  ·  " + bytes(part.reclaimable_bytes) + " recuperáveis");
+      line.className += " sub";
+      body.appendChild(droppable(line, 44 + index));
+    });
+  }
+
+  function renderUpdates(body, updates) {
+    if (!updates || updates.state === "unavailable") { return; }
+    var block = el("div", "list");
+    block.appendChild(el("h3", "", "Últimos updates"));
+    if (updates.recent.length === 0) {
+      block.appendChild(el("div", "sub", "Nenhum update pedido ainda"));
+    }
+    updates.recent.forEach(function (u, index) {
+      var info = UPDATE_STATUS[u.status] || [u.status, ""];
+      var line = item((u.project || "?") + "  ·  " + info[0], age(u.age_hours), info[1]);
+      block.appendChild(index > 0 ? droppable(line, 35 + index) : line);
+    });
+    body.appendChild(droppable(block, 34));
+  }
+
+  function renderHost(section, docker, updates) {
     var body = panel("host", section);
     if (section.cpu_percent === null) { return unavailable(body, section); }
     var meters = el("div", "meters");
@@ -134,15 +226,16 @@
     meters.appendChild(meter("Memória", section.memory_percent,
       bytes(section.memory_used_bytes) + " de " + bytes(section.memory_total_bytes),
       level(section.memory_percent, 90, 97)));
-    section.disks.forEach(function (disk) {
-      meters.appendChild(meter("Disco " + disk.name, disk.percent,
+    section.disks.forEach(function (disk, index) {
+      var node = meter("Disco " + disk.name, disk.percent,
         number(disk.percent, 0) + " % de " + bytes(disk.total_bytes),
-        level(disk.percent, 85, 95)));
+        level(disk.percent, 85, 95));
+      meters.appendChild(index > 0 ? droppable(node, 10 + index) : node);
     });
     body.appendChild(meters);
-    body.appendChild(row("Carga (1, 5, 15 min)",
-      section.load_average.map(function (n) { return number(n, 2); }).join("   ")));
-    body.appendChild(row("Ligado há", duration(section.uptime_seconds)));
+    renderDocker(body, docker);
+    renderUpdates(body, updates);
+    body.appendChild(droppable(row("Ligado há", duration(section.uptime_seconds)), 50));
     if (section.note) { body.appendChild(el("div", "sub", section.note)); }
   }
 
@@ -150,7 +243,9 @@
     var column = el("div");
     column.appendChild(el("h3", "", title));
     var list = el("div", "list");
-    rows.forEach(function (r) { list.appendChild(item(r.name, valueOf(r))); });
+    rows.forEach(function (r, index) {
+      list.appendChild(droppable(item(r.name, valueOf(r)), 40 + index));
+    });
     column.appendChild(list);
     return column;
   }
@@ -165,12 +260,12 @@
       body.appendChild(el("div", "sub", "Nenhum container com problema"));
     } else {
       var list = el("div", "list");
-      section.problems.slice(0, 4).forEach(function (p) {
+      section.problems.slice(0, 3).forEach(function (p) {
         var kinds = p.problems.map(function (k) { return PROBLEMS[k] || k; }).join(", ");
         list.appendChild(item(p.name, kinds, "bad"));
       });
-      if (section.problems.length > 4) {
-        list.appendChild(item("+" + (section.problems.length - 4) + " outros", "", "bad"));
+      if (section.problems.length > 3) {
+        list.appendChild(item("+" + (section.problems.length - 3) + " outros", "", "bad"));
       }
       body.appendChild(list);
     }
@@ -189,15 +284,23 @@
     var head = el("div", "big");
     head.appendChild(pill);
     body.appendChild(head);
-    body.appendChild(row("Último backup", age(section.last_success_age_hours)));
+    var last = age(section.last_success_age_hours);
+    if (section.last_duration_seconds !== null && section.last_duration_seconds !== undefined) {
+      last += "  ·  levou " + took(section.last_duration_seconds);
+    }
+    body.appendChild(row("Último backup", last));
     section.repositories.forEach(function (repo) {
       var text = age(repo.snapshot_age_hours);
+      if (repo.size_bytes !== null && repo.size_bytes !== undefined) {
+        text += "  ·  " + bytes(repo.size_bytes);
+      }
       if (repo.free_bytes !== null && repo.free_bytes !== undefined) {
         text += "  ·  " + bytes(repo.free_bytes) + " livres";
       }
-      body.appendChild(row("Cópia " + repo.name, text));
+      body.appendChild(droppable(row("Cópia " + repo.name, text), 20));
     });
-    body.appendChild(row("Verificação semanal", CHECKS[section.integrity] || "sem registro"));
+    body.appendChild(droppable(
+      row("Verificação semanal", CHECKS[section.integrity] || "sem registro"), 26));
     var restore = CHECKS[section.restore_test] || "sem registro";
     if (section.restore_next_run_at) {
       var next = new Date(section.restore_next_run_at);
@@ -205,8 +308,10 @@
         restore += "  ·  próximo " + next.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
       }
     }
-    body.appendChild(row("Teste de restauração", restore));
-    if (section.state !== "ok" && section.summary) { body.appendChild(el("div", "sub", section.summary)); }
+    body.appendChild(droppable(row("Teste de restauração", restore), 25));
+    if (section.state !== "ok" && section.summary) {
+      body.appendChild(droppable(el("div", "sub", section.summary), 60));
+    }
   }
 
   function renderNetwork(section) {
@@ -219,15 +324,34 @@
     section.by_type.forEach(function (t) {
       chips.appendChild(el("span", "chip", t.count + " " + (DEVICE_TYPES[t.device_type] || t.device_type)));
     });
-    body.appendChild(chips);
+    body.appendChild(droppable(chips, 50));
+    if (section.new_devices > 0) {
+      body.appendChild(droppable(el("div", "sub", section.new_devices +
+        (section.new_devices === 1 ? " dispositivo novo" : " dispositivos novos") +
+        " nos últimos dias"), 45));
+    }
     if (section.findings.length === 0) {
       body.appendChild(el("div", "sub", "Nada incomum na rede"));
     } else {
       var list = el("div", "list");
-      section.findings.slice(0, 3).forEach(function (f) {
-        list.appendChild(item(FINDINGS[f.kind] || f.kind, f.ip || "", f.severity === "alert" ? "bad" : "warn"));
+      section.findings.slice(0, 3).forEach(function (f, index) {
+        var node = item(FINDINGS[f.kind] || f.kind, f.ip || "", f.severity === "alert" ? "bad" : "warn");
+        list.appendChild(index > 0 ? droppable(node, 30 + index) : node);
       });
       body.appendChild(list);
+    }
+    if (section.offline.length > 0) {
+      var away = el("div", "list");
+      away.appendChild(el("h3", "", "Fora do ar"));
+      section.offline.slice(0, 3).forEach(function (d, index) {
+        var line = item(d.name, (DEVICE_TYPES[d.device_type] || d.device_type) + "  ·  " + age(d.age_hours));
+        away.appendChild(index > 0 ? droppable(line, 41 + index) : line);
+      });
+      body.appendChild(droppable(away, 40));
+    }
+    if (section.stale) {
+      body.appendChild(droppable(
+        el("div", "sub", "O último scan está velho: o scanner pode ter parado"), 60));
     }
     if (section.note) { body.appendChild(el("div", "sub", section.note)); }
   }
@@ -238,15 +362,27 @@
     banner.textContent = text || "";
   }
 
+  var lastStatus = null;
+
+  function fitAll() {
+    ["host", "containers", "backup", "network"].forEach(function (id) {
+      fit(document.querySelector("#" + id + " .body"));
+    });
+  }
+
   function render(status) {
+    lastStatus = status;
     var overall = document.getElementById("overall");
     overall.className = "overall s-" + status.overall;
     overall.textContent = OVERALL[status.overall] || "";
     document.getElementById("dot").className = "dot s-" + status.overall;
-    renderHost(status.host);
+    renderHost(status.host, status.docker, status.updates);
     renderContainers(status.containers);
     renderBackup(status.backup);
     renderNetwork(status.network);
+    fitAll();
+    // Once more when the browser has settled the layout (fonts, scrollbars, a window being resized).
+    setTimeout(fitAll, 150);
     var minutes = Math.round((status.age_seconds || 0) / 60);
     document.getElementById("updated").textContent =
       minutes < 1 ? "atualizado agora" : "atualizado há " + minutes + " min";
@@ -291,6 +427,12 @@
     root.setProperty("--shift-x", SHIFTS[shiftIndex][0] + "px");
     root.setProperty("--shift-y", SHIFTS[shiftIndex][1] + "px");
   }
+
+  var resizing = null;
+  window.addEventListener("resize", function () {
+    clearTimeout(resizing);
+    resizing = setTimeout(function () { if (lastStatus) { render(lastStatus); } }, 250);
+  });
 
   tick();
   load();

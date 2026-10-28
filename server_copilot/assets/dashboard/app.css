@@ -85,7 +85,10 @@ h2 {
   letter-spacing: 0.12em;
 }
 
-.body { display: flex; flex-direction: column; gap: 0.55rem; min-height: 0; overflow: hidden; }
+.body { display: flex; flex-direction: column; flex: 1 1 auto; gap: 0.55rem; min-height: 0; overflow: hidden; }
+
+/* Rows keep their height when the panel is small: the script drops the least important ones. */
+.body > * { flex-shrink: 0; }
 
 .big { font-size: 2.4rem; font-weight: 600; line-height: 1.1; }
 .big small { font-size: 1rem; font-weight: 400; color: var(--muted); margin-left: 0.4rem; }
@@ -109,7 +112,7 @@ h2 {
 .item.bad .name { color: var(--error); }
 .item.warn .name { color: var(--warning); }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
-.cols h3 { font-size: 0.75rem; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.1em; }
+.body h3 { font-size: 0.75rem; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.1em; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .chip { background: var(--line); border-radius: 1rem; padding: 0.15rem 0.7rem; font-size: 0.85rem; }

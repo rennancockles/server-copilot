@@ -22,10 +22,12 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from server_copilot.backup import BackupStatus, load_status
+from server_copilot.compose_update import UpdateError, UpdateStatus, collect_status
 from server_copilot.config import Settings, get_settings
 from server_copilot.containers import ContainerSummary, fetch_containers
 from server_copilot.diagnostics import ProblemReport, find_problems
 from server_copilot.docker import DockerClient, DockerError
+from server_copilot.docker_usage import DockerDiskUsage, fetch_docker_disk_usage
 from server_copilot.host import HostMetrics, collect_host_metrics, parse_disks
 from server_copilot.network import NetworkDevices, list_devices, unknown_devices
 from server_copilot.network_snapshot import read_snapshot
@@ -44,6 +46,11 @@ MEMORY_ERROR = 97.0
 HOST_TIMEOUT = 10
 FILE_TIMEOUT = 10
 DOCKER_TIMEOUT = 30
+DOCKER_USAGE_TIMEOUT = 60
+OFFLINE_SHOWN = 5
+UPDATES_SHOWN = 3
+RECENT_UPDATE_HOURS = 24.0
+SECONDS_PER_HOUR = 3600
 STALE_AFTER_REFRESHES = 3
 SEVERE_PROBLEMS = {"unhealthy", "restart_loop", "oom_killed", "dead"}
 STATE_RANK: dict[State, int] = {"unavailable": 0, "ok": 1, "warning": 2, "error": 3}
@@ -114,6 +121,7 @@ class ContainersSection(_Section):
 class RepositoryRow(BaseModel):
     name: str
     snapshot_age_hours: float | None
+    size_bytes: int | None
     free_bytes: int | None
 
 
@@ -121,6 +129,7 @@ class BackupSection(_Section):
     status: str | None = None
     summary: str | None = None
     last_success_age_hours: float | None = None
+    last_duration_seconds: int | None = None
     integrity: str | None = None
     restore_test: str | None = None
     restore_next_run_at: str | None = None
@@ -139,12 +148,44 @@ class FindingRow(BaseModel):
     detail: str
 
 
+class OfflineRow(BaseModel):
+    name: str
+    device_type: str
+    age_hours: float | None
+
+
 class NetworkSection(_Section):
     online: int = 0
     new_devices: int = 0
+    stale: bool = False
     by_type: list[TypeRow] = Field(default_factory=list)
     findings: list[FindingRow] = Field(default_factory=list)
+    offline: list[OfflineRow] = Field(default_factory=list)
     age_minutes: float | None = None
+
+
+class UsageRow(BaseModel):
+    name: str
+    size_bytes: int
+    reclaimable_bytes: int
+
+
+class DockerSection(_Section):
+    total_bytes: int | None = None
+    reclaimable_bytes: int | None = None
+    parts: list[UsageRow] = Field(default_factory=list)
+
+
+class UpdateRow(BaseModel):
+    project: str | None
+    status: str
+    age_hours: float | None
+    failed_step: str | None
+
+
+class UpdatesSection(_Section):
+    recent: list[UpdateRow] = Field(default_factory=list)
+    waiting: int = 0
 
 
 class DashboardStatus(BaseModel):
@@ -152,6 +193,8 @@ class DashboardStatus(BaseModel):
     refresh_seconds: int
     overall: State
     host: HostSection
+    docker: DockerSection
+    updates: UpdatesSection
     containers: ContainersSection
     backup: BackupSection
     network: NetworkSection
@@ -241,20 +284,48 @@ def backup_section(status: BackupStatus) -> BackupSection:
         status=status.status,
         summary=status.summary,
         last_success_age_hours=backup.last_success_age_hours if backup else None,
+        last_duration_seconds=backup.duration_seconds if backup else None,
         integrity=status.integrity.state if status.integrity else None,
         restore_test=status.restore_test.state if status.restore_test else None,
         restore_next_run_at=status.restore_test.next_run_at if status.restore_test else None,
         repositories=[
             RepositoryRow(
-                name=r.name, snapshot_age_hours=r.snapshot_age_hours, free_bytes=r.free_bytes
+                name=r.name,
+                snapshot_age_hours=r.snapshot_age_hours,
+                size_bytes=r.size_bytes,
+                free_bytes=r.free_bytes,
             )
             for r in status.repositories
         ],
     )
 
 
-def network_section(result: NetworkDevices) -> NetworkSection:
-    """Counts and findings only: no MAC addresses and no list of devices."""
+def _hours_since(moment: str | None, now: datetime) -> float | None:
+    if not moment:
+        return None
+    try:
+        then = datetime.fromisoformat(moment)
+    except ValueError:
+        return None
+    return round(max(0.0, (now - then).total_seconds() / SECONDS_PER_HOUR), 1)
+
+
+def _offline_rows(result: NetworkDevices, now: datetime) -> list[OfflineRow]:
+    """Known devices missing from the last scan, without phones and tablets, which come and go."""
+    rows = [
+        OfflineRow(
+            name=d.name or d.hostname or d.vendor or d.ip or "dispositivo",
+            device_type=d.device_type,
+            age_hours=_hours_since(d.last_seen, now),
+        )
+        for d in result.offline_devices
+        if d.device_type != "phone_or_tablet"
+    ]
+    return rows[:OFFLINE_SHOWN]
+
+
+def network_section(result: NetworkDevices, now: datetime) -> NetworkSection:
+    """Counts, findings and names of devices that went away: no MAC addresses."""
     if result.status == "unknown":
         return NetworkSection(note=result.summary)
     findings = [
@@ -273,10 +344,51 @@ def network_section(result: NetworkDevices) -> NetworkSection:
         new_devices=sum(f.kind == "new_device" for f in result.findings),
         by_type=[TypeRow(device_type=c.device_type, count=c.count) for c in result.counts],
         findings=findings,
+        offline=_offline_rows(result, now),
+        stale=result.status == "stale",
         age_minutes=result.age_minutes,
-        note="The last scan is old; the scanner may have stopped."
-        if result.status == "stale"
-        else None,
+    )
+
+
+def docker_section(report: DockerDiskUsage) -> DockerSection:
+    return DockerSection(
+        state="ok",
+        total_bytes=report.total_bytes,
+        reclaimable_bytes=report.reclaimable_bytes,
+        parts=[
+            UsageRow(
+                name=name, size_bytes=part.size_bytes, reclaimable_bytes=part.reclaimable_bytes
+            )
+            for name, part in (
+                ("images", report.images),
+                ("volumes", report.volumes),
+                ("build_cache", report.build_cache),
+            )
+        ],
+    )
+
+
+def updates_section(status: UpdateStatus, now: datetime) -> UpdatesSection:
+    """The latest updates asked of the host; a failure in the last day is a warning."""
+    rows = [
+        UpdateRow(
+            project=u.project,
+            status=u.status,
+            age_hours=_hours_since(u.finished_at or u.started_at or u.requested_at, now),
+            failed_step=u.failed_step,
+        )
+        for u in status.updates
+    ]
+    recent_failure = any(
+        r.status in ("failed", "rejected")
+        and r.age_hours is not None
+        and r.age_hours <= RECENT_UPDATE_HOURS
+        for r in rows
+    )
+    return UpdatesSection(
+        state="warning" if recent_failure else "ok",
+        recent=rows[:UPDATES_SHOWN],
+        waiting=sum(r.status in ("queued", "running") for r in rows),
     )
 
 
@@ -306,10 +418,10 @@ class Dashboard:
         except DockerError as exc:
             return empty(note=str(exc))
         except TimeoutError:
-            return empty(note="It took too long to read.")
+            return empty(note="Demorou demais para ler.")
         except Exception as exc:  # noqa: BLE001
             logger.warning("dashboard section %s failed: %s", label, type(exc).__name__)
-            return empty(note="It could not be read.")
+            return empty(note="Não foi possível ler.")
 
     async def _host(self) -> HostSection:
         return host_section(await asyncio.to_thread(collect_host_metrics, self.disks))
@@ -328,25 +440,45 @@ class Dashboard:
 
     async def _network(self) -> NetworkSection:
         loaded = await asyncio.to_thread(read_snapshot, self.settings.network_scan_file)
+        now = self.now()
         if isinstance(loaded, str):
-            return network_section(unknown_devices(loaded))
-        result = list_devices(
-            loaded, self.now(), device_type=None, query=None, include_offline=False
-        )
-        return network_section(result)
+            return network_section(unknown_devices(loaded), now)
+        result = list_devices(loaded, now, device_type=None, query=None, include_offline=True)
+        return network_section(result, now)
+
+    async def _docker_usage(self) -> DockerSection:
+        return docker_section(await fetch_docker_disk_usage(self.docker, top=1))
+
+    async def _updates(self) -> UpdatesSection:
+        requests, results = self.settings.update_requests_dir, self.settings.update_results_dir
+        if not requests or not results:
+            return UpdatesSection(note="Os updates não estão configurados.")
+        now = self.now()
+        try:
+            status = await asyncio.to_thread(
+                collect_status, requests, results, None, now.timestamp()
+            )
+        except UpdateError as exc:
+            return UpdatesSection(note=str(exc))
+        return updates_section(status, now)
 
     async def collect(self) -> DashboardStatus:
-        host, containers, backup, network = await asyncio.gather(
+        host, docker, updates, containers, backup, network = await asyncio.gather(
             self._guard("host", HostSection, HOST_TIMEOUT, self._host()),
+            self._guard("docker", DockerSection, DOCKER_USAGE_TIMEOUT, self._docker_usage()),
+            self._guard("updates", UpdatesSection, FILE_TIMEOUT, self._updates()),
             self._guard("containers", ContainersSection, DOCKER_TIMEOUT, self._containers()),
             self._guard("backup", BackupSection, FILE_TIMEOUT, self._backup()),
             self._guard("network", NetworkSection, FILE_TIMEOUT, self._network()),
         )
+        states = [s.state for s in (host, docker, updates, containers, backup, network)]
         return DashboardStatus(
             generated_at=self.now().isoformat(timespec="seconds"),
             refresh_seconds=self.settings.dashboard_refresh_seconds,
-            overall=overall_state([host.state, containers.state, backup.state, network.state]),
+            overall=overall_state(states),
             host=host,
+            docker=docker,
+            updates=updates,
             containers=containers,
             backup=backup,
             network=network,
