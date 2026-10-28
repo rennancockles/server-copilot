@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.14.1 (2026-10-28)
+
+### Bug Fixes
+
+- Show one dashboard panel per row on phones
+  ([`edeb6c0`](https://github.com/rennancockles/server-copilot/commit/edeb6c09987c38779e9d0fa8bc526b34388d1f7a))
+
+
 ## v0.14.0 (2026-10-28)
 
 ### Features
