@@ -14,6 +14,10 @@ services:
       # Where the scanner service (profile lan-scan, below) leaves its snapshot. Without that
       # service the network tools answer "unknown".
       SERVER_COPILOT_NETWORK_SCAN_FILE: /var/lib/server-copilot-network/scan.json
+    # Names for your devices (see the README, "Naming the devices you know"): a JSON file by MAC,
+    # in a folder bind-mounted read-only.
+    #   SERVER_COPILOT_NETWORK_ALIASES_FILE=/aliases/aliases.json
+    #     - /var/lib/server-copilot-aliases:/aliases:ro
     # To scan a home directory with get_disk_usage, also run as the host user (mode 750 homes):
     #   user: "1000:1000"
     # Host disks: bind-mount each filesystem to monitor read-only, next to the scan volume,

@@ -140,6 +140,7 @@ environment or from `.env`:
 | `SERVER_COPILOT_DASHBOARD_REFRESH_SECONDS` | `30`                  | Dashboard only: seconds between its reads of the server (10 to 600); the page is served from memory (see Dashboard). |
 | `SERVER_COPILOT_BACKUP_STATUS_FILE` | _(empty)_                    | JSON file the host writes about its backups (see Backup status). Empty makes `get_backup_status` answer `unknown`. |
 | `SERVER_COPILOT_NETWORK_SCAN_FILE` | _(empty)_                     | Snapshot the scanner service writes and the network tools read (see Network discovery). Empty makes them answer `unknown`. The compose file sets it. |
+| `SERVER_COPILOT_NETWORK_ALIASES_FILE` | _(empty)_                  | JSON file, written by hand, with your alias and note for each device by MAC (see Network discovery, "Naming the devices you know"). Empty or missing means no aliases. |
 | `SERVER_COPILOT_NETWORK_SCAN_CIDRS` | _(empty)_                    | Scanner only: private networks it may probe, comma separated, each at most a `/22`. Empty scans the subnets of the host's own interfaces. |
 | `SERVER_COPILOT_NETWORK_SCAN_INTERVAL_SECONDS` | `300`             | Scanner only: seconds between scans (60 to 86400).       |
 | `SERVER_COPILOT_NETWORK_SCAN_TIMEOUT_SECONDS` | `120`              | Scanner only: time limit of one scan (10 to 900); a scan that hits it keeps what it found and says so. |
@@ -485,6 +486,7 @@ server-copilot-dashboard:
     SERVER_COPILOT_HOST_DISKS: root=/host/root
     SERVER_COPILOT_BACKUP_STATUS_FILE: /host/backup-status/backup-status.json
     SERVER_COPILOT_NETWORK_SCAN_FILE: /var/lib/server-copilot-network/scan.json
+    SERVER_COPILOT_NETWORK_ALIASES_FILE: /aliases/aliases.json   # optional: your device names
     SERVER_COPILOT_UPDATE_REQUESTS_DIR: /updates/requests   # optional: the latest updates
     SERVER_COPILOT_UPDATE_RESULTS_DIR: /updates/results
   ports: ["8084:8081"]
@@ -493,6 +495,7 @@ server-copilot-dashboard:
     - /:/host/root:ro
     - /var/lib/home-server-infra-status:/host/backup-status:ro
     - network-scan:/var/lib/server-copilot-network:ro
+    - /var/lib/server-copilot-aliases:/aliases:ro
     - /var/lib/home-server-infra-update/requests:/updates/requests:ro
     - /var/lib/home-server-infra-update/results:/updates/results:ro
   read_only: true
@@ -599,6 +602,29 @@ and guesses are kept apart:
 `inspect_network_device` accepts an IP, a MAC in any common notation, or part of a name, maker or
 model. A device that was seen before but is missing now comes back with `online: false` and its last
 known address, so "where was the printer?" still has an answer.
+
+### Naming the devices you know
+
+The scanner can only report what a device says about itself, which is often a model code or nothing at
+all. To give your devices names, write a small JSON file by hand, keyed by MAC address (in any usual
+notation; a plain string is just the alias):
+
+```json
+{
+  "f4:7b:5e:00:00:09": {"alias": "TV da sala", "note": "Samsung 65 OLED, garantia até 2026"},
+  "00-1B-A9-00-00-50": "Impressora do escritório"
+}
+```
+
+Bind-mount the **folder** that holds it read-only into the MCP service and the dashboard (mounting a
+file that does not exist yet makes Docker create a directory in its place) and point
+`SERVER_COPILOT_NETWORK_ALIASES_FILE` at it. It is read on every refresh, so an edit shows up without
+restarting anything. The alias replaces the device's own name on the TV page, in `/network` and in
+`discover_network_devices` / `inspect_network_device`, which also search by alias and note; the note
+shows in `/network` and in `inspect_network_device`. Text is cleaned like any device text (plain
+characters, one short line), a MAC that does not parse is skipped, and a file that cannot be read shows
+as a note instead of hiding the network. A phone with a randomized MAC changes address, so it will not
+keep its alias.
 
 ### Findings: "is anything unusual?"
 

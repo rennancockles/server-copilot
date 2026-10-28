@@ -76,3 +76,4 @@ td.sub { color: var(--muted); }
 }
 .banner[hidden] { display: none; }
 body.stale main { opacity: 0.45; }
+td.alias { font-weight: 600; }

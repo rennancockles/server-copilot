@@ -31,6 +31,7 @@ from server_copilot.docker import DockerClient, DockerError
 from server_copilot.docker_usage import DockerDiskUsage, fetch_docker_disk_usage
 from server_copilot.host import HostMetrics, collect_host_metrics, parse_disks
 from server_copilot.network import NetworkDevices, list_devices, unknown_devices
+from server_copilot.network_aliases import apply_aliases, load_aliases
 from server_copilot.network_scan import RISKY_PORTS
 from server_copilot.network_snapshot import read_snapshot
 from server_copilot.stats import StatsOverview, fetch_stats_overview
@@ -187,6 +188,8 @@ class RiskyDeviceRow(BaseModel):
 
 class DeviceDetail(BaseModel):
     name: str | None
+    alias: str | None
+    note: str | None
     ip: str
     mac: str | None
     vendor: str | None
@@ -200,6 +203,8 @@ class DeviceDetail(BaseModel):
 
 class OfflineDetail(BaseModel):
     name: str | None
+    alias: str | None
+    note: str | None
     ip: str | None
     mac: str | None
     vendor: str | None
@@ -430,12 +435,13 @@ def _offline_rows(result: NetworkDevices, now: datetime) -> list[OfflineRow]:
     """
     rows = [
         OfflineRow(
-            name=d.name or d.hostname or d.vendor or d.ip or "dispositivo",
+            name=d.alias or d.name or d.hostname or d.vendor or d.ip or "dispositivo",
             device_type=d.device_type,
             age_hours=_hours_since(d.last_seen, now),
         )
         for d in result.offline_devices
-        if d.device_type != "phone_or_tablet" and (d.device_type != "unknown" or d.name or d.vendor)
+        if d.device_type != "phone_or_tablet"
+        and (d.device_type != "unknown" or d.alias or d.name or d.vendor)
     ]
     return rows[:OFFLINE_SHOWN]
 
@@ -451,6 +457,8 @@ def _device_details(result: NetworkDevices) -> list[DeviceDetail]:
     return [
         DeviceDetail(
             name=d.name or d.hostname,
+            alias=d.alias,
+            note=d.note,
             ip=d.ip,
             mac=d.mac,
             vendor=d.vendor,
@@ -469,6 +477,8 @@ def _offline_details(result: NetworkDevices, now: datetime) -> list[OfflineDetai
     return [
         OfflineDetail(
             name=d.name or d.hostname,
+            alias=d.alias,
+            note=d.note,
             ip=d.ip,
             mac=d.mac,
             vendor=d.vendor,
@@ -483,7 +493,7 @@ def _offline_details(result: NetworkDevices, now: datetime) -> list[OfflineDetai
 def _risky_devices(result: NetworkDevices) -> list[RiskyDeviceRow]:
     return [
         RiskyDeviceRow(
-            name=d.name or d.hostname or d.vendor or d.ip,
+            name=d.alias or d.name or d.hostname or d.vendor or d.ip,
             ip=d.ip,
             ports=[p for p in d.open_ports if p in RISKY_PORTS],
         )
@@ -492,7 +502,9 @@ def _risky_devices(result: NetworkDevices) -> list[RiskyDeviceRow]:
     ]
 
 
-def network_section(result: NetworkDevices, now: datetime) -> NetworkSection:
+def network_section(
+    result: NetworkDevices, now: datetime, warning: str | None = None
+) -> NetworkSection:
     """Counts, findings and names of devices that went away: no MAC addresses.
 
     Risky open ports are listed but never change the state: they are often not fixable, and a page
@@ -520,6 +532,7 @@ def network_section(result: NetworkDevices, now: datetime) -> NetworkSection:
         offline=_offline_rows(result, now),
         stale=result.status == "stale",
         age_minutes=result.age_minutes,
+        note=warning,
         devices=_device_details(result),
         offline_devices=_offline_details(result, now),
         all_findings=[
@@ -626,8 +639,15 @@ class Dashboard:
         now = self.now()
         if isinstance(loaded, str):
             return network_section(unknown_devices(loaded), now)
-        result = list_devices(loaded, now, device_type=None, query=None, include_offline=True)
-        return network_section(result, now)
+        aliases = await asyncio.to_thread(load_aliases, self.settings.network_aliases_file)
+        result = list_devices(
+            apply_aliases(loaded, aliases.entries),
+            now,
+            device_type=None,
+            query=None,
+            include_offline=True,
+        )
+        return network_section(result, now, aliases.warning)
 
     async def _docker_usage(self) -> DockerSection:
         return docker_section(await fetch_docker_disk_usage(self.docker, top=1))

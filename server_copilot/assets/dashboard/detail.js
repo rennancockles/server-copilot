@@ -134,7 +134,8 @@
   }
 
   function deviceName(d) {
-    var parts = [d.name || d.vendor || "sem nome"];
+    var parts = [d.alias || d.name || d.vendor || "sem nome"];
+    if (d.alias && d.name && d.alias !== d.name) { parts[0] += " (" + d.name + ")"; }
     if (d.is_gateway) { parts.push("roteador"); }
     return parts.join(" · ");
   }
@@ -186,17 +187,21 @@
 
     var online = networkCard("Online", data.devices.length + " dispositivos", "ok");
     var table = el("table");
-    table.appendChild(head(["Nome", "IP", "MAC", "Fabricante", "Tipo", "Portas abertas", "Visto desde"]));
+    var labels = ["Nome", "IP", "MAC", "Fabricante", "Tipo", "Portas abertas", "Visto desde"];
+    var withNotes = data.devices.some(function (d) { return d.note; });
+    if (withNotes) { labels.push("Nota"); }
+    table.appendChild(head(labels));
     var rows = el("tbody");
     data.devices.forEach(function (d) {
       var tr = el("tr");
-      tr.appendChild(cell(deviceName(d) + (d.is_new ? " · novo" : "")));
+      tr.appendChild(cell(deviceName(d) + (d.is_new ? " · novo" : ""), d.alias ? "alias" : ""));
       tr.appendChild(cell(d.ip, "mono"));
       tr.appendChild(cell(d.mac || "–", "mono sub"));
       tr.appendChild(cell(d.vendor || "–", "sub"));
       tr.appendChild(cell(DEVICE_TYPES[d.device_type] || d.device_type, "sub"));
       tr.appendChild(portsCell(d));
       tr.appendChild(cell(day(d.first_seen), "sub"));
+      if (withNotes) { tr.appendChild(cell(d.note || "", "sub")); }
       rows.appendChild(tr);
     });
     table.appendChild(rows);
@@ -206,16 +211,20 @@
     if (data.offline_devices.length > 0) {
       var away = networkCard("Fora do ar", data.offline_devices.length + " dispositivos", "ok");
       var gone = el("table");
-      gone.appendChild(head(["Nome", "IP", "MAC", "Fabricante", "Tipo", "Visto por último"]));
+      var goneLabels = ["Nome", "IP", "MAC", "Fabricante", "Tipo", "Visto por último"];
+      var goneNotes = data.offline_devices.some(function (d) { return d.note; });
+      if (goneNotes) { goneLabels.push("Nota"); }
+      gone.appendChild(head(goneLabels));
       var goneRows = el("tbody");
       data.offline_devices.forEach(function (d) {
         var tr = el("tr");
-        tr.appendChild(cell(deviceName(d)));
+        tr.appendChild(cell(deviceName(d), d.alias ? "alias" : ""));
         tr.appendChild(cell(d.ip || "–", "mono"));
         tr.appendChild(cell(d.mac || "–", "mono sub"));
         tr.appendChild(cell(d.vendor || "–", "sub"));
         tr.appendChild(cell(DEVICE_TYPES[d.device_type] || d.device_type, "sub"));
         tr.appendChild(cell(age(d.last_seen_age_hours), "sub"));
+        if (goneNotes) { tr.appendChild(cell(d.note || "", "sub")); }
         goneRows.appendChild(tr);
       });
       gone.appendChild(goneRows);

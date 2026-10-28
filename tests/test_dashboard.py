@@ -978,7 +978,9 @@ async def test_the_page_and_its_assets_are_served_with_a_strict_policy(
         assert "script-src 'self'" in policy
         assert "unsafe-inline" not in policy
         assert "unsafe-eval" not in policy
-    assert "Home Server" in web.get("/").text
+    home = web.get("/").text
+    assert "Home Server" in home
+    assert re.findall(r'class="more" href="([^"]+)"', home) == ["/containers", "/network"]
 
 
 async def test_the_status_api_has_the_four_sections_and_the_age(
@@ -1032,6 +1034,52 @@ async def test_the_network_api_has_the_devices_with_their_mac_and_the_tv_payload
     assert body["stale"] is False
     status = web.get("/api/status").json()["network"]
     assert not {"devices", "offline_devices", "all_findings"} & set(status)
+
+
+async def test_aliases_name_the_devices_on_the_tv_and_the_detail_page(
+    tmp_path: Path, sources: None
+) -> None:
+    aliases = tmp_path / "aliases.json"
+    aliases.write_text(json.dumps({MAC: {"alias": "TV da sala", "note": "Comprada em 2024"}}))
+    web = client(await ready(tmp_path, network_aliases_file=str(aliases)))
+
+    network_body = web.get("/api/network").json()
+    tv = web.get("/api/status").json()["network"]
+
+    tv_device = network_body["devices"][0]
+    assert (tv_device["alias"], tv_device["note"]) == ("TV da sala", "Comprada em 2024")
+    assert network_body["devices"][1]["alias"] is None
+    assert tv["note"] is None
+    assert "Comprada em 2024" not in json.dumps(tv)
+
+
+async def test_an_unusable_alias_file_is_a_note_and_does_not_hide_the_network(
+    tmp_path: Path, sources: None
+) -> None:
+    aliases = tmp_path / "aliases.json"
+    aliases.write_text("{broken")
+    board = await ready(tmp_path, network_aliases_file=str(aliases))
+
+    assert board.status is not None
+    network_status = board.status.network
+    assert network_status.state == "ok"
+    assert network_status.online == 2
+    assert network_status.note == "Não foi possível ler o arquivo de apelidos."
+
+
+def test_a_risky_device_and_an_offline_one_show_their_alias_on_the_tv() -> None:
+    snap = snapshot()
+    snap.devices[0].ports = [Port(port=23)]
+    snap.devices[0].alias = "TV da sala"
+    gone = offline_device(None, "unknown", 2)
+    gone.vendor = None
+    gone.alias = "Luz da garagem"
+    snap.offline_devices = [gone]
+
+    section = network(snap)
+
+    assert [r.name for r in section.risky_devices] == ["TV da sala"]
+    assert [o.name for o in section.offline] == ["Luz da garagem"]
 
 
 async def test_the_api_says_when_it_has_not_collected_anything_yet(tmp_path: Path) -> None:

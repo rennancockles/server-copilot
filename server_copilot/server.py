@@ -72,6 +72,6 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
     register_text_tools(mcp, readable)
     register_diagnostic_tools(mcp, client)
     register_backup_tools(mcp, settings.backup_status_file)
-    register_network_tools(mcp, settings.network_scan_file)
+    register_network_tools(mcp, settings.network_scan_file, settings.network_aliases_file)
 
     return mcp

@@ -77,8 +77,10 @@ main {
 .panel.s-warning { border-left-color: var(--warning); }
 .panel.s-error { border-left-color: var(--error); }
 
-h2 a { color: inherit; text-decoration: none; }
 h2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--muted);
@@ -157,4 +159,18 @@ body.stale main { opacity: 0.45; }
 
 @media (max-width: 480px) {
   .cols { grid-template-columns: 1fr; gap: 0.8rem; }
+}
+
+h2 .more {
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+@media (max-width: 800px) {
+  h2 .more { padding: 0.5rem 0 0.5rem 1rem; margin: -0.5rem 0; font-size: 0.95rem; }
 }

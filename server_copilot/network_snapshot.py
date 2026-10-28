@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -11,6 +12,7 @@ MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
 MAX_TEXT_LENGTH = 64
 MAX_DETAIL_LENGTH = 240
 MAX_LIST_ITEMS = 32
+MAC_HEX_DIGITS = 12
 
 DeviceType = Literal[
     "router",
@@ -30,16 +32,36 @@ Severity = Literal["info", "warning", "alert"]
 FindingKind = Literal["new_device", "gateway_mac_changed", "duplicate_mac", "risky_ports"]
 NetworkSource = Literal["configured", "auto"]
 
-_UNSAFE_TEXT = re.compile(r"[^\w .,:;()\[\]/+'@#&-]")
+_UNSAFE_TEXT = re.compile(r"[^\w .,:;()\[\]/+'@#&″-]")
+ENTITY_PASSES = 2
+
+
+def _decode_entities(text: str) -> str:
+    """Some devices send their name already HTML-escaped (a Samsung TV: '65&quot; OLED')."""
+    for _ in range(ENTITY_PASSES):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text
 
 
 def clean(text: str, limit: int = MAX_TEXT_LENGTH) -> str:
     """Device-supplied text is untrusted: keep plain characters only, on one short line."""
+    text = _decode_entities(text).replace('"', "″")
     return " ".join(_UNSAFE_TEXT.sub("", text).split())[:limit]
 
 
 def _clean_detail(text: str) -> str:
     return clean(text, MAX_DETAIL_LENGTH)
+
+
+def normalize_mac(text: str) -> str | None:
+    """'AA-BB-CC-00-11-22', 'aabb.cc00.1122' and the like as 'aa:bb:cc:00:11:22', else None."""
+    digits = re.sub(r"[^0-9a-f]", "", text.casefold())
+    if len(digits) == MAC_HEX_DIGITS and len(digits) == len(re.sub(r"[:.\-\s]", "", text)):
+        return ":".join(digits[i : i + 2] for i in range(0, MAC_HEX_DIGITS, 2))
+    return None
 
 
 Clean = Annotated[str, AfterValidator(clean)]
@@ -100,6 +122,9 @@ class Device(_Model):
     hostname: Clean | None = None
     hostname_source: Literal["mdns", "dns"] | None = None
     name: Clean | None = None
+    # Given by the owner (network_aliases), never by the scanner.
+    alias: Clean | None = None
+    note: Detail | None = None
     discovered_via: list[Via] = Field(default_factory=list)
     ports: list[Port] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     services: list[Service] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
@@ -117,6 +142,8 @@ class OfflineDevice(_Model):
     vendor: Clean | None = None
     name: Clean | None = None
     hostname: Clean | None = None
+    alias: Clean | None = None
+    note: Detail | None = None
     device_type: DeviceType = "unknown"
     first_seen: AwareDatetime
     last_seen: AwareDatetime

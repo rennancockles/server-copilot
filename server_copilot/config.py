@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # Seconds between the dashboard's background reads of the server (it serves them from memory).
     dashboard_refresh_seconds: int = Field(default=30, ge=10, le=600)
     network_scan_file: str = ""
+    # JSON file, written by hand, with the owner's alias and note for each device by MAC (see
+    # network_aliases). Empty or missing means no aliases.
+    network_aliases_file: str = ""
     # Comma-separated private IPv4 CIDRs the scanner may probe (at most /22 each). Empty scans
     # the subnets of the host's own physical interfaces.
     network_scan_cidrs: str = ""
