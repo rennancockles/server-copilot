@@ -1085,6 +1085,15 @@ async def test_only_reading_is_allowed_and_unknown_paths_are_not_found(
     assert web.get("/favicon.ico").status_code == 204
 
 
+def test_the_phone_layout_is_one_column_and_the_script_stops_dropping_lines_there() -> None:
+    root = resources.files("server_copilot").joinpath("assets", "dashboard")
+    css = root.joinpath("app.css").read_text("utf-8")
+    script = root.joinpath("app.js").read_text("utf-8")
+
+    assert "@media (max-width: 800px)" in css
+    assert 'matchMedia("(max-width: 800px)")' in script
+
+
 def test_the_page_runs_no_inline_code_and_never_builds_markup_from_data() -> None:
     root = resources.files("server_copilot").joinpath("assets", "dashboard")
     pages = {"index.html": "app.js", "containers.html": "detail.js", "network.html": "detail.js"}

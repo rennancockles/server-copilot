@@ -383,7 +383,9 @@
 
   var lastStatus = null;
 
+  // The phone layout stacks the panels and scrolls, so nothing has to be dropped to fit.
   function fitAll() {
+    if (window.matchMedia("(max-width: 800px)").matches) { return; }
     ["host", "containers", "backup", "network"].forEach(function (id) {
       fit(document.querySelector("#" + id + " .body"));
     });
