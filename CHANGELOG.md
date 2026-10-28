@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.12.0 (2026-10-28)
+
+### Features
+
+- Add a LAN dashboard page with the state of the server
+  ([`ec5998c`](https://github.com/rennancockles/server-copilot/commit/ec5998c57b943a27aed3939eda209ac50367f892))
+
+
 ## v0.11.0 (2026-10-28)
 
 ### Features
