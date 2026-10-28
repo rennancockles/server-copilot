@@ -137,6 +137,7 @@ environment or from `.env`:
 | `SERVER_COPILOT_READABLE_DIRS` | _(empty)_                         | Directories whose text files `read_text_file` may return, `name=/container/path`, comma separated, each mounted read-only (see Reading text files). Empty disables the tool. |
 | `SERVER_COPILOT_UPDATE_REQUESTS_DIR` | _(empty)_                   | Folder where update requests are queued (mount it read-write). Empty disables the update tools (see Updating Compose projects). |
 | `SERVER_COPILOT_UPDATE_RESULTS_DIR` | _(empty)_                    | Folder where the host runner leaves its results (mount it read-only). |
+| `SERVER_COPILOT_DASHBOARD_REFRESH_SECONDS` | `30`                  | Dashboard only: seconds between its reads of the server (10 to 600); the page is served from memory (see Dashboard). |
 | `SERVER_COPILOT_BACKUP_STATUS_FILE` | _(empty)_                    | JSON file the host writes about its backups (see Backup status). Empty makes `get_backup_status` answer `unknown`. |
 | `SERVER_COPILOT_NETWORK_SCAN_FILE` | _(empty)_                     | Snapshot the scanner service writes and the network tools read (see Network discovery). Empty makes them answer `unknown`. The compose file sets it. |
 | `SERVER_COPILOT_NETWORK_SCAN_CIDRS` | _(empty)_                    | Scanner only: private networks it may probe, comma separated, each at most a `/22`. Empty scans the subnets of the host's own interfaces. |
@@ -449,6 +450,61 @@ and ignores a file whose `schema_version` is not `1` or whose `id` does not matc
 
 `status` is `running`, `succeeded`, `failed` or `rejected`; `failed_step` is `pull`, `up` or `verify`.
 All timestamps carry a timezone.
+
+## Dashboard
+
+`server-copilot-dashboard` serves a page with the state of the server, made to be read from across the
+room on a TV and to open in any browser on the LAN: **Servidor** (CPU, memory, each disk, load,
+uptime), **Containers** (running of total, the ones with problems, the busiest by CPU and memory),
+**Backup** (last backup, snapshot ages, free space on the Drive, the weekly check and the restore test)
+and **Rede** (devices online by type, and the scanner's findings). The text of the page is in
+Portuguese.
+
+It is a separate process of the same image, never part of the MCP server. The MCP is reachable from the
+Internet through the tunnel; this page is not meant to be, and it has **no login**, so keep it off the
+`edge` network and out of the tunnel: anyone on your LAN (a guest on your Wi-Fi included) can open it.
+It only reads, shows no secret, log, path or MAC address, and answers `GET` only.
+
+```yaml
+server-copilot-dashboard:
+  image: ghcr.io/rennancockles/server-copilot:latest
+  command: ["server-copilot-dashboard"]
+  environment:
+    SERVER_COPILOT_PORT: 8081
+    SERVER_COPILOT_DOCKER_HOST: tcp://docker-socket-proxy:2375
+    SERVER_COPILOT_HOST_DISKS: root=/host/root
+    SERVER_COPILOT_BACKUP_STATUS_FILE: /host/backup-status/backup-status.json
+    SERVER_COPILOT_NETWORK_SCAN_FILE: /var/lib/server-copilot-network/scan.json
+  ports: ["8084:8081"]
+  networks: [docker-api]          # Docker through the proxy; not the edge network
+  volumes:                        # the same mounts as the MCP service, all read-only
+    - /:/host/root:ro
+    - /var/lib/home-server-infra-status:/host/backup-status:ro
+    - network-scan:/var/lib/server-copilot-network:ro
+  read_only: true
+  cap_drop: [ALL]
+```
+
+How it works: a background task reads the server every `SERVER_COPILOT_DASHBOARD_REFRESH_SECONDS` (30
+by default) with the same code the MCP tools use, and keeps the result in memory. The page asks for
+`/api/status` every 15 seconds and shows what was last read, so ten TVs cost the same as none. Each
+section is read on its own: a section that fails or takes too long shows "Indisponível" with the
+reason, and the others keep working. The colour of the page is the worst state of the sections it
+could read, and `/api/status` reports `stale: true` (and the page dims) when the server stopped
+refreshing.
+
+- **States:** a disk at 85% or memory at 90% is a warning, 95% and 97% an error; a container that is
+  unhealthy, in a restart loop, OOM-killed or dead is an error, one that exited with an error a
+  warning; the backup states are the ones of `get_backup_status`; scanner alerts are errors and its
+  warnings are warnings.
+- **OLED screens:** a page that never changes burns into the panel, so the page uses a black background
+  and dim text, and drifts a few pixels every minute. Still, do not leave it on all day: close it (or
+  turn the TV off) when nobody is looking.
+- **The page** is plain HTML, CSS and JavaScript (no build, no external file) written for old browsers
+  too. It builds the screen only with `textContent`, and the policy it is served with
+  (`default-src 'none'`, scripts only from itself) means that a container or device name can never
+  become markup.
+- **Endpoints:** `/` (the page), `/api/status` (JSON), `/health`. Nothing else.
 
 ## Network discovery
 

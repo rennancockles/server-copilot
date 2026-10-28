@@ -34,6 +34,7 @@ dev = [
 [project.scripts]
 server-copilot = "server_copilot.__main__:main"
 server-copilot-scanner = "server_copilot.network_scan:main"
+server-copilot-dashboard = "server_copilot.dashboard:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["server_copilot"]

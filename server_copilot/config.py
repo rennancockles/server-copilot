@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     # Either empty disables the update tools.
     update_requests_dir: str = ""
     update_results_dir: str = ""
+    # Seconds between the dashboard's background reads of the server (it serves them from memory).
+    dashboard_refresh_seconds: int = Field(default=30, ge=10, le=600)
     network_scan_file: str = ""
     # Comma-separated private IPv4 CIDRs the scanner may probe (at most /22 each). Empty scans
     # the subnets of the host's own physical interfaces.
