@@ -1,7 +1,7 @@
 {
   "apps": "./.app.json",
   "name": "dev-6ada1c2987708191abea5aa643aa3558",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Consulte containers, logs e métricas do seu servidor doméstico.",
   "author": {
     "email": "r3ck.dev@gmail.com",

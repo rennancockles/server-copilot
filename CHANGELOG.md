@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.14.0 (2026-10-28)
+
+### Features
+
+- Add containers and network detail pages and quiet the dashboard status
+  ([`3ad60ba`](https://github.com/rennancockles/server-copilot/commit/3ad60ba06b1a3357f5725503de09eb2ae3da9d54))
+
+
 ## v0.13.0 (2026-10-28)
 
 ### Features
