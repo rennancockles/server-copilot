@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "server-copilot"
-version = "0.14.1"
+version = "0.15.0"
 description = "MCP server to inspect and manage a home server (Docker containers, logs, metrics)."
 readme = "README.md"
 requires-python = ">=3.12"

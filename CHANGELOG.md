@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.15.0 (2026-10-28)
+
+### Features
+
+- Name the devices you know with an alias and note file
+  ([`92b44a0`](https://github.com/rennancockles/server-copilot/commit/92b44a0ef473bf5efd4a6ac4da1aae686534c6c0))
+
+
 ## v0.14.1 (2026-10-28)
 
 ### Bug Fixes
