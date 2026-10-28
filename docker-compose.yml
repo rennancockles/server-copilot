@@ -27,6 +27,12 @@ services:
     # (name=/container/path,...), e.g. the runbooks:
     #   SERVER_COPILOT_READABLE_DIRS=runbooks=/runbooks
     #     - /home/youruser/Repos/home_server_infra/docs:/runbooks:ro
+    # Updating Compose projects (update_compose_project) needs a runner on the host that serves two
+    # folders (see the README, "Updating Compose projects"): requests read-write, results read-only.
+    #   SERVER_COPILOT_UPDATE_REQUESTS_DIR=/updates/requests
+    #   SERVER_COPILOT_UPDATE_RESULTS_DIR=/updates/results
+    #     - /var/lib/home-server-infra-update/requests:/updates/requests
+    #     - /var/lib/home-server-infra-update/results:/updates/results:ro
     volumes:
       - network-scan:/var/lib/server-copilot-network:ro
     networks:

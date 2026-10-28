@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     backup_status_file: str = ""
     # JSON file the LAN scanner service writes and the network tools read. Empty disables the
     # tools, which then answer "unknown".
+    # Folders shared with the host runner that updates Compose projects: requests are written to
+    # the first (mount it read-write), results are read from the second (mount it read-only).
+    # Either empty disables the update tools.
+    update_requests_dir: str = ""
+    update_results_dir: str = ""
     network_scan_file: str = ""
     # Comma-separated private IPv4 CIDRs the scanner may probe (at most /22 each). Empty scans
     # the subnets of the host's own physical interfaces.

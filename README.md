@@ -5,8 +5,9 @@
 # server-copilot
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant look at your home server:
-containers, logs, resource usage, host metrics and Docker events. It is **read-only** and talks to
-Docker only through [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy), never
+containers, logs, resource usage, host metrics and Docker events. It is **read-only**, with one
+exception that never touches Docker itself (asking the host to update a stack, see _Updating Compose
+projects_), and it talks to Docker only through [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy), never
 through `docker.sock` directly.
 
 ## Tools
@@ -25,13 +26,17 @@ through `docker.sock` directly.
 | `get_disk_usage`          | Largest files and directories inside a configured disk, with sizes.               |
 | `list_files`              | Names, types, sizes and dates in one directory of a configured disk or readable directory (no contents). |
 | `read_text_file`          | The text of any visible text file in a readable directory (runbooks, scripts, configs), in pages of lines; hidden files, binaries and anything outside the directory are refused. |
+| `plan_compose_update`     | Step 1 of updating a Compose project: what would happen, warnings, and a single-use confirmation code (read-only). |
+| `update_compose_project`  | Step 2: asks the host runner to pull the images and recreate what changed. Needs the code; the only tool that changes the server. |
+| `get_compose_update_status` | Queued, running, succeeded, failed or rejected updates, with steps, container health and the output tail. |
 | `recent_events`           | Docker events (start, die, oom, restart, health) in a time window.                |
 | `find_problem_containers` | Unhealthy, restart-looping, OOM-killed, dead or crashed containers.               |
 | `get_backup_status`       | Whether the host backups ran, are recent and can be recovered: last run, snapshot ages, integrity check and restore test. |
 | `discover_network_devices` | Devices on the home LAN with IP, MAC, maker, name, guessed type and open ports, plus findings (new device, changed gateway MAC, ...). |
 | `inspect_network_device`  | Everything known about one LAN device (by IP, MAC or name), observed facts kept apart from guesses; for a Samsung TV, its model, name, firmware and Tizen version. |
 
-All tools are annotated read-only. Environment variables and labels whose names look sensitive
+All tools are annotated read-only except `update_compose_project`, which only queues a request
+for the host runner (and needs a confirmation code from `plan_compose_update`). Environment variables and labels whose names look sensitive
 (`password`, `token`, `key`, `secret`, ...) and credentials inside URLs are masked, but **log
 content is returned as-is**, so anyone holding the access token can read what your containers log.
 
@@ -130,6 +135,8 @@ environment or from `.env`:
 | `SERVER_COPILOT_DOCKER_HOST`   | `tcp://docker-socket-proxy:2375`  | docker-socket-proxy endpoint (`tcp://host:port`).        |
 | `SERVER_COPILOT_HOST_DISKS`    | _(empty)_                         | Disks to report, `name=/container/path`, comma separated. |
 | `SERVER_COPILOT_READABLE_DIRS` | _(empty)_                         | Directories whose text files `read_text_file` may return, `name=/container/path`, comma separated, each mounted read-only (see Reading text files). Empty disables the tool. |
+| `SERVER_COPILOT_UPDATE_REQUESTS_DIR` | _(empty)_                   | Folder where update requests are queued (mount it read-write). Empty disables the update tools (see Updating Compose projects). |
+| `SERVER_COPILOT_UPDATE_RESULTS_DIR` | _(empty)_                    | Folder where the host runner leaves its results (mount it read-only). |
 | `SERVER_COPILOT_BACKUP_STATUS_FILE` | _(empty)_                    | JSON file the host writes about its backups (see Backup status). Empty makes `get_backup_status` answer `unknown`. |
 | `SERVER_COPILOT_NETWORK_SCAN_FILE` | _(empty)_                     | Snapshot the scanner service writes and the network tools read (see Network discovery). Empty makes them answer `unknown`. The compose file sets it. |
 | `SERVER_COPILOT_NETWORK_SCAN_CIDRS` | _(empty)_                    | Scanner only: private networks it may probe, comma separated, each at most a `/22`. Empty scans the subnets of the host's own interfaces. |
@@ -168,7 +175,8 @@ and this server only validates the token.
 - Clients find the AuthKit domain through `/.well-known/oauth-protected-resource/mcp` (public) and
   the `resource_metadata` link in the `WWW-Authenticate` header of the `401`.
 - There are no custom scopes: AuthKit offers only `openid`, `email`, `profile` and
-  `offline_access`, so access is the audience plus the allowlist. Every tool is read-only anyway.
+  `offline_access`, so access is the audience plus the allowlist. Every tool is read-only except
+  `update_compose_project`, which can only ask the host to update a stack on its own allowlist.
 
 Set it up in the WorkOS dashboard: enable AuthKit, enable *Client ID Metadata Document* and/or
 *Dynamic Client Registration* (*Connect → Configuration*), and add the **Resource Indicator**
@@ -364,6 +372,83 @@ What it refuses, and what it does:
 - The text comes back as data. The tool description tells the client not to treat instructions inside
   a file as requests from the user, but anyone who can edit the folder can write text an assistant
   will read, so mount a repository only you can write to.
+
+## Updating Compose projects
+
+`plan_compose_update`, `update_compose_project` and `get_compose_update_status` update a stack
+without an SSH session: "update media", then "did it work?". This server never gets the power to do
+it itself. It has no Docker write access, so it only **asks**: it drops a small request into a queue
+folder, and a **runner on the host** (in `home_server_infra`, a systemd path unit) picks it up,
+validates it against its own allowlist, runs `docker compose pull` and, only if the pull succeeds,
+`docker compose up -d`, then leaves a result that this server reads. A compromised token can therefore
+ask for the update of an allowed stack and nothing else: no container creation, no arbitrary command.
+
+The flow is in two steps, so a stray request or an instruction hidden in some text cannot update
+anything on its own:
+
+1. `plan_compose_update(project, services?)` is read-only. It shows the services and the images they
+   run now, what the host will do, warnings (this server restarting itself, the Cloudflare tunnel or
+   the Docker proxy being recreated) and a **confirmation code**. The code is valid for five minutes,
+   works once, and only for that project and those services; it lives in this process's memory, so a
+   restart invalidates it.
+2. After the user has agreed, `update_compose_project(project, confirmation_code, services?)` queues
+   the request and returns a `request_id` at once. It is asynchronous because a pull of large images
+   can outlast a tool call, and so that this server can update itself: it restarts, and the result is
+   read afterwards.
+3. `get_compose_update_status(request_id?)` follows it: `queued`, `running`, `succeeded`, `failed`
+   or `rejected`, with the steps and their duration, the state and health of the containers
+   afterwards and the tail of the output (colors and control characters removed, credentials in URLs
+   masked). `queued` for more than three minutes means the runner is not running.
+
+An update for a project that already has one queued or running is refused, and at most five requests
+wait at once. A failed pull leaves the running containers as they were; a stack that is not on the
+runner's allowlist is `rejected`.
+
+Mount two folders, one for each direction (the runner and its units are in
+`home_server_infra/docs/compose-update.md`):
+
+```yaml
+environment:
+  SERVER_COPILOT_UPDATE_REQUESTS_DIR: /updates/requests
+  SERVER_COPILOT_UPDATE_RESULTS_DIR: /updates/results
+volumes:
+  - /var/lib/home-server-infra-update/requests:/updates/requests
+  - /var/lib/home-server-infra-update/results:/updates/results:ro
+```
+
+Keep the results folder read-only: the container can queue requests, but it cannot forge a result.
+The requests folder must be writable by the container's user.
+
+### The contract with the runner
+
+A request is `requests/<id>.json` (`id` is 32 lowercase hex characters), written under a hidden
+temporary name and renamed into place:
+
+```json
+{"schema_version": 1, "id": "<id>", "project": "media", "services": ["plex"],
+ "requested_at": "2026-10-28T12:00:00+00:00"}
+```
+
+The runner reads at most 4 KiB, accepts only these keys and names that match
+`[A-Za-z0-9][A-Za-z0-9_.-]*`, and moves the file out of `requests/` before it acts. It then writes
+`results/<id>.json` (replacing it atomically, first as `running`, finally with the outcome); this
+server reads at most 64 KiB, ignores unknown keys, reduces every name and message to plain characters
+and ignores a file whose `schema_version` is not `1` or whose `id` does not match its name:
+
+```json
+{"schema_version": 1, "id": "<id>", "project": "media", "services": ["plex"],
+ "requested_at": "2026-10-28T12:00:00+00:00", "started_at": "2026-10-28T12:00:02+00:00",
+ "finished_at": "2026-10-28T12:01:10+00:00", "status": "succeeded", "failed_step": null,
+ "message": "media was updated.",
+ "steps": [{"name": "pull", "ok": true, "seconds": 41.2}, {"name": "up", "ok": true, "seconds": 9.0},
+           {"name": "verify", "ok": true, "seconds": 12.5}],
+ "containers": [{"service": "plex", "name": "media-plex-1", "state": "running",
+                 "health": "healthy", "image": "plexinc/pms-docker:latest"}],
+ "output_tail": "Container media-plex-1  Recreated\n"}
+```
+
+`status` is `running`, `succeeded`, `failed` or `rejected`; `failed_step` is `pull`, `up` or `verify`.
+All timestamps carry a timezone.
 
 ## Network discovery
 

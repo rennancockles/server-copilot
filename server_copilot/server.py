@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse, Response
 
 from server_copilot.backup import register_backup_tools
 from server_copilot.compose import register_compose_tools
+from server_copilot.compose_update import register_update_tools
 from server_copilot.config import get_settings
 from server_copilot.containers import register_container_tools
 from server_copilot.diagnostics import register_diagnostic_tools
@@ -54,6 +55,7 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
 
     register_container_tools(mcp, client)
     register_compose_tools(mcp, client)
+    register_update_tools(mcp, client, settings.update_requests_dir, settings.update_results_dir)
     register_log_tools(mcp, client)
     register_stats_tools(mcp, client)
     register_docker_usage_tools(mcp, client)
