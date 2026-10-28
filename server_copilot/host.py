@@ -54,7 +54,7 @@ class HostMetrics(BaseModel):
     notes: list[str]
 
 
-def parse_disks(spec: str) -> dict[str, str]:
+def parse_disks(spec: str, kind: str = "host disk") -> dict[str, str]:
     """Parse 'name=/path,other=/path2' (a bare '/path' uses the path as its name)."""
     disks: dict[str, str] = {}
     for raw_entry in spec.split(","):
@@ -66,9 +66,9 @@ def parse_disks(spec: str) -> dict[str, str]:
             name, path = entry, entry
         name, path = name.strip(), path.strip()
         if not name or not path.startswith("/"):
-            raise ValueError(f"Invalid host disk entry {entry!r}; expected 'name=/absolute/path'")
+            raise ValueError(f"Invalid {kind} entry {entry!r}; expected 'name=/absolute/path'")
         if name in disks:
-            raise ValueError(f"Duplicate host disk name {name!r}")
+            raise ValueError(f"Duplicate {kind} name {name!r}")
         disks[name] = path
     return disks
 

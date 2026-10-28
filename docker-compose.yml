@@ -22,6 +22,11 @@ services:
     #   volumes:
     #     - /:/host/root:ro
     #     - /mnt/data:/host/data:ro
+    # Folders for read_text_file (every visible text file in them is served, so mount only what is
+    # safe to show): bind-mount read-only and name each in SERVER_COPILOT_READABLE_DIRS
+    # (name=/container/path,...), e.g. the runbooks:
+    #   SERVER_COPILOT_READABLE_DIRS=runbooks=/runbooks
+    #     - /home/youruser/Repos/home_server_infra/docs:/runbooks:ro
     volumes:
       - network-scan:/var/lib/server-copilot-network:ro
     networks:

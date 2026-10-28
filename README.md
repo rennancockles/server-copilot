@@ -23,7 +23,8 @@ through `docker.sock` directly.
 | `get_docker_disk_usage`   | Docker disk use (images, containers, volumes, build cache) and what could be cleaned up. |
 | `get_host_metrics`        | Host CPU, load, memory, swap, uptime and disk usage per configured mount.         |
 | `get_disk_usage`          | Largest files and directories inside a configured disk, with sizes.               |
-| `list_files`              | Names, types, sizes and dates in one directory of a configured disk (no contents). |
+| `list_files`              | Names, types, sizes and dates in one directory of a configured disk or readable directory (no contents). |
+| `read_text_file`          | The text of any visible text file in a readable directory (runbooks, scripts, configs), in pages of lines; hidden files, binaries and anything outside the directory are refused. |
 | `recent_events`           | Docker events (start, die, oom, restart, health) in a time window.                |
 | `find_problem_containers` | Unhealthy, restart-looping, OOM-killed, dead or crashed containers.               |
 | `get_backup_status`       | Whether the host backups ran, are recent and can be recovered: last run, snapshot ages, integrity check and restore test. |
@@ -128,6 +129,7 @@ environment or from `.env`:
 | `SERVER_COPILOT_PORT`          | `8000`                            | Port inside the container.                               |
 | `SERVER_COPILOT_DOCKER_HOST`   | `tcp://docker-socket-proxy:2375`  | docker-socket-proxy endpoint (`tcp://host:port`).        |
 | `SERVER_COPILOT_HOST_DISKS`    | _(empty)_                         | Disks to report, `name=/container/path`, comma separated. |
+| `SERVER_COPILOT_READABLE_DIRS` | _(empty)_                         | Directories whose text files `read_text_file` may return, `name=/container/path`, comma separated, each mounted read-only (see Reading text files). Empty disables the tool. |
 | `SERVER_COPILOT_BACKUP_STATUS_FILE` | _(empty)_                    | JSON file the host writes about its backups (see Backup status). Empty makes `get_backup_status` answer `unknown`. |
 | `SERVER_COPILOT_NETWORK_SCAN_FILE` | _(empty)_                     | Snapshot the scanner service writes and the network tools read (see Network discovery). Empty makes them answer `unknown`. The compose file sets it. |
 | `SERVER_COPILOT_NETWORK_SCAN_CIDRS` | _(empty)_                    | Scanner only: private networks it may probe, comma separated, each at most a `/22`. Empty scans the subnets of the host's own interfaces. |
@@ -317,6 +319,51 @@ passwords and tokens are never part of the file or of the answer.
 
 `schema_version` must be `1`; all timestamps need a timezone. A new version of the file needs a
 matching version of the server, and until then the answer is `unknown`.
+
+## Reading text files
+
+`read_text_file` returns the text of a file so an assistant can quote the current runbook (the
+disaster recovery steps, the from-scratch drill) or look at a script or a config in a later
+conversation. It only reads: it never runs a command it finds, so a step in a runbook or a line in a
+script is information, not an action.
+
+Mount **only the folders you want read**, read-only, and name each one in
+`SERVER_COPILOT_READABLE_DIRS`. This is separate from `SERVER_COPILOT_HOST_DISKS`: a disk is browsable
+by name and size only, while a readable directory also gives out file contents, so nothing becomes
+readable by being a disk.
+
+```yaml
+environment:
+  SERVER_COPILOT_READABLE_DIRS: runbooks=/runbooks
+volumes:
+  - /home/youruser/Repos/home_server_infra/docs:/runbooks:ro
+```
+
+Then `list_files(disk="runbooks")` shows the files and
+`read_text_file(directory="runbooks", path="disaster-recovery.md")` reads one. The container user
+must be able to read the folder (run it as the host user if the repository sits in a mode 750 home).
+The server refuses to start when a name is both a disk and a readable directory.
+
+**The mount is the boundary.** Inside a readable directory the server assumes that every visible text
+file is safe to show: it does not filter by extension or by name, so a `.py`, a config, a `.pem` or a
+file called `secrets.md` is served like any other. Only mount folders where that is true.
+
+What it refuses, and what it does:
+
+- Hidden files and directories (names starting with `.`, so `.env`, `.ssh`, `.git`), anywhere in the
+  path. The refusal does not say whether the file exists.
+- Anything outside the directory: `..`, absolute paths, and symlinks that leave it. A symlink inside
+  the directory that leads to a hidden name is refused too, because where it really points is checked.
+- Files that are not plain UTF-8 text: binary files, invalid UTF-8, and anything over 1 MiB.
+- A page is at most 500 lines and 64 KiB (400 lines by default); `offset` (the first line, from 1) and
+  `next_offset` read on. The disaster recovery runbook fits in one call.
+- Credentials inside URLs (`https://user:password@host`) are masked. A secret written any other way is
+  **not** detected.
+- Every read and every refusal is logged with the directory and path (and the line range and size for
+  a read), never the content.
+- The text comes back as data. The tool description tells the client not to treat instructions inside
+  a file as requests from the user, but anyone who can edit the folder can write text an assistant
+  will read, so mount a repository only you can write to.
 
 ## Network discovery
 

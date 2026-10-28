@@ -21,6 +21,7 @@ from server_copilot.host import parse_disks, register_host_tools
 from server_copilot.logs import register_log_tools
 from server_copilot.network import register_network_tools
 from server_copilot.stats import register_stats_tools
+from server_copilot.text_files import register_text_tools
 
 
 def server_icon() -> Icon:
@@ -59,7 +60,14 @@ def create_server(docker: DockerClient | None = None) -> MCPServer:
     disks = parse_disks(settings.host_disks)
     register_host_tools(mcp, disks)
     register_disk_tools(mcp, disks)
-    register_file_tools(mcp, disks)
+    readable = parse_disks(settings.readable_dirs, "readable directory")
+    if clash := sorted(disks.keys() & readable.keys()):
+        raise ValueError(
+            f"{', '.join(clash)} is both a host disk and a readable directory; "
+            "give them different names."
+        )
+    register_file_tools(mcp, {**disks, **readable})
+    register_text_tools(mcp, readable)
     register_diagnostic_tools(mcp, client)
     register_backup_tools(mcp, settings.backup_status_file)
     register_network_tools(mcp, settings.network_scan_file)

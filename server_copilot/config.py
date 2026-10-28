@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     port: int = 8000
     docker_host: str = "tcp://docker-socket-proxy:2375"
     host_disks: str = ""
+    # Directories whose text files (.md, .txt) read_text_file may return: name=/container/path,
+    # comma separated, each bind-mounted read-only. Empty disables the tool.
+    readable_dirs: str = ""
     # JSON file the host writes about its backups (bind-mount its folder read-only). Empty
     # disables get_backup_status, which then answers "unknown".
     backup_status_file: str = ""
