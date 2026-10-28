@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.10.0 (2026-10-28)
+
+### Chores
+
+- Update .env.example with the scanner, backup status and readable dirs variables
+  ([`12ac048`](https://github.com/rennancockles/server-copilot/commit/12ac048656349a902ca3b2e084ef878ee598dffc))
+
+### Features
+
+- Add read_text_file MCP tool for readable directories
+  ([`0ca121b`](https://github.com/rennancockles/server-copilot/commit/0ca121ba85277a27846924dd799ea7ba1bcab72d))
+
+
 ## v0.9.0 (2026-10-27)
 
 ### Features
