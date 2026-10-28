@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.13.0 (2026-10-28)
+
+### Features
+
+- Show Docker usage, updates, offline devices and backup details on the dashboard
+  ([`b606479`](https://github.com/rennancockles/server-copilot/commit/b606479b3794e258b3e867c19cd456dfeb00ae7f))
+
+
 ## v0.12.0 (2026-10-28)
 
 ### Features
