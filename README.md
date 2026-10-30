@@ -34,9 +34,14 @@ through `docker.sock` directly.
 | `get_backup_status`       | Whether the host backups ran, are recent and can be recovered: last run, snapshot ages, integrity check and restore test. |
 | `discover_network_devices` | Devices on the home LAN with IP, MAC, maker, name, guessed type and open ports, plus findings (new device, changed gateway MAC, ...). |
 | `inspect_network_device`  | Everything known about one LAN device (by IP, MAC or name), observed facts kept apart from guesses; for a Samsung TV, its model, name, firmware and Tizen version. |
+| `get_printer_status`      | Whether a printer on the home network (found with `discover_network_devices`) is ready, what needs attention (paper, ink, jam), ink levels, and the print queue (read-only). |
+| `plan_print`              | Step 1 of printing: checks the attached PDF/JPEG (or a test page) and the printer, and returns a summary and a single-use confirmation code. Nothing is printed. |
+| `print_document`          | Step 2: sends the planned document to the printer. Needs the code; uses paper and ink. |
+| `get_print_job`           | State of a print job (queued, printing, completed, failed), read-only. |
 
 All tools are annotated read-only except `update_compose_project`, which only queues a request
-for the host runner (and needs a confirmation code from `plan_compose_update`). Environment variables and labels whose names look sensitive
+for the host runner (and needs a confirmation code from `plan_compose_update`), and `print_document`,
+which sends a job to the printer (and needs a confirmation code from `plan_print`). Environment variables and labels whose names look sensitive
 (`password`, `token`, `key`, `secret`, ...) and credentials inside URLs are masked, but **log
 content is returned as-is**, so anyone holding the access token can read what your containers log.
 
@@ -374,6 +379,53 @@ What it refuses, and what it does:
 - The text comes back as data. The tool description tells the client not to treat instructions inside
   a file as requests from the user, but anyone who can edit the folder can write text an assistant
   will read, so mount a repository only you can write to.
+
+## Printing
+
+`get_printer_status`, `plan_print`, `print_document` and `get_print_job` print from a chat: attach a
+PDF or a photo in ChatGPT, say "print this", and it comes out of the printer. The server speaks
+**IPP** (the protocol the printer itself serves on port 631) directly, with no CUPS and no driver, so
+anything IPP Everywhere compatible works; it was written for an Epson EcoTank ET-2860.
+
+There is nothing to configure and no IP to pin. The assistant finds the printer with
+`discover_network_devices` (a printer has port 631 open) and passes its address in the `printer`
+argument of each printing tool; if the printer's IP changes, the next discovery finds the new one.
+The address comes from the conversation, so the server never trusts it: it must resolve only to a
+private home-network address (loopback, link-local, multicast and public addresses are refused
+before any request is sent), only port 631 is used, and the host must answer an IPP
+`Get-Printer-Attributes` as a printer that supports `Print-Job`. Anything else (a router, a NAS, a
+web server) is refused as "not a printer" and receives nothing but that one read-only question. A name
+is resolved once and the IP is what gets used, so it cannot point somewhere else afterwards. `printer`
+accepts `192.168.1.94`, `192.168.1.94:631` or a full `ipp://192.168.1.94/ipp/print`; without a path it
+tries `/ipp/print`, `/ipp` and `/`.
+
+Printing is in two steps, like Compose updates, so a stray request or an instruction hidden in a
+document cannot print anything on its own:
+
+1. `plan_print(printer, file?, test_page?, copies?, color?, paper?, landscape?)` downloads the attached file,
+   checks it and the printer, and keeps it in memory. It prints nothing. It returns a `summary` (file,
+   pages, copies, color, paper, orientation and the printer's model and address), `warnings` (low ink, no paper) and a **confirmation
+   code**, valid for five minutes and good once. `test_page=true` plans a built-in page with a swatch
+   of each ink instead of a file.
+2. After the user has agreed, `print_document(confirmation_code)` sends exactly what the plan held and
+   returns the printer's **job id** and state, on the printer the plan checked. `get_print_job(printer, job_id)` then follows it: `queued`,
+   `printing`, `completed` or `failed`, with `finished` telling when to stop asking.
+
+If `print_document` fails, the code is spent: ask for a new plan after looking at
+`get_printer_status`, so a lost reply can never print twice.
+
+Limits (in `server_copilot/printing.py`): PDF or JPEG only, judged by the file's bytes and by what the
+printer says it accepts (a PNG is refused, not converted), at most 10 MB, 20 pages and 5 copies; a
+password-protected or unreadable PDF is refused. The paper size must be one the printer lists (`a4`,
+`letter`, or its own name such as `iso_a4_210x297mm`). `get_printer_status(printer)` needs no
+confirmation: it only reads the state, the ink and the queue.
+
+How the file arrives: `plan_print` declares its `file` argument as a file parameter
+(`openai/fileParams`), so ChatGPT hands the server a temporary download link instead of the file's
+bytes. The server follows only a plain `https` link that resolves to a public address (no redirects,
+no credentials in the link, no private or loopback address), so a link made up by a prompt-injected
+document cannot make it call something on your network. The link is never logged. After upgrading,
+refresh the plugin's tools in ChatGPT so it sees the new file parameter.
 
 ## Updating Compose projects
 
