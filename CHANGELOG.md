@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.16.0 (2026-10-30)
+
+### Features
+
+- Print documents on a LAN printer over IPP with plan-then-confirm
+  ([`4f076c5`](https://github.com/rennancockles/server-copilot/commit/4f076c5433bed984a4b238b43594d88774c54a68))
+
+
 ## v0.15.0 (2026-10-28)
 
 ### Features
