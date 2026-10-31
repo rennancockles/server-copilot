@@ -66,9 +66,16 @@ def _render_pdf_page(
 
 
 def rasterize_pdf(  # noqa: PLR0913
-    document: bytes, *, media: str, dpi: int, gray: bool, max_bytes: int, max_pages: int
+    document: bytes,
+    *,
+    media: str,
+    dpi: int,
+    gray: bool,
+    max_bytes: int,
+    max_pages: int,
+    pages: list[int] | None = None,
 ) -> bytes:
-    """A PDF as PWG raster pages on ``media`` at ``dpi``."""
+    """A PDF as PWG raster pages on ``media`` at ``dpi``; ``pages`` (1-based) picks which."""
     width, height = page_pixels(media, dpi)
     failure = RasterError("The PDF could not be rendered for this printer; it will not be printed.")
     with _PDFIUM_LOCK:
@@ -78,14 +85,23 @@ def rasterize_pdf(  # noqa: PLR0913
             raise failure from exc
         try:
             count = len(pdf)
-            if count > max_pages:
-                raise RasterError(f"The document has {count} pages; the limit is {max_pages}.")
-            pages = (
-                _rows(_render_pdf_page(pdf[index], width, height, dpi, gray))
-                for index in range(count)
+            indexes = [number - 1 for number in pages] if pages else list(range(count))
+            if any(not 0 <= index < count for index in indexes):
+                raise RasterError(f"The PDF has {count} pages; some chosen pages do not exist.")
+            if len(indexes) > max_pages:
+                raise RasterError(
+                    f"The document has {len(indexes)} pages; the limit is {max_pages}."
+                )
+            rendered = (
+                _rows(_render_pdf_page(pdf[index], width, height, dpi, gray)) for index in indexes
             )
             return encode_pages(
-                pages, total_pages=count, media=media, dpi=dpi, gray=gray, max_bytes=max_bytes
+                rendered,
+                total_pages=len(indexes),
+                media=media,
+                dpi=dpi,
+                gray=gray,
+                max_bytes=max_bytes,
             )
         except pdfium.PdfiumError as exc:
             raise failure from exc

@@ -30,17 +30,22 @@ def noisy_jpeg(size: tuple[int, int]) -> bytes:
     return out.getvalue()
 
 
-def black_page_pdf(width: int, height: int) -> bytes:
-    """A PDF whose one page of ``width`` x ``height`` points is entirely black."""
-    content = f"0 g 0 0 {width} {height} re f".encode()
+def black_pages_pdf(*sizes: tuple[int, int]) -> bytes:
+    """A PDF with one entirely black page per ``(width, height)`` in points."""
+    kids = " ".join(f"{3 + 2 * index} 0 R" for index in range(len(sizes)))
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents 4 0 R >>"
-        ).encode(),
-        b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+        f"<< /Type /Pages /Kids [{kids}] /Count {len(sizes)} >>".encode(),
     ]
+    for index, (width, height) in enumerate(sizes):
+        content = f"0 g 0 0 {width} {height} re f".encode()
+        objects.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+                f"/Contents {4 + 2 * index} 0 R >>"
+            ).encode()
+        )
+        objects.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -57,6 +62,10 @@ def black_page_pdf(width: int, height: int) -> bytes:
     return bytes(out)
 
 
+def black_page_pdf(width: int, height: int) -> bytes:
+    return black_pages_pdf((width, height))
+
+
 def blank_pdf(pages: int) -> bytes:
     writer = PdfWriter()
     for _ in range(pages):
@@ -70,8 +79,17 @@ def photo(data: bytes, *, gray: bool = False, dpi: int = DPI) -> Page:
     return Page(rasterize_photo(data, media=A4, dpi=dpi, gray=gray, max_bytes=LIMIT))
 
 
-def pdf_pages(data: bytes, *, gray: bool = True, dpi: int = DPI, pages: int = 20) -> list[Page]:
-    raster = rasterize_pdf(data, media=A4, dpi=dpi, gray=gray, max_bytes=LIMIT, max_pages=pages)
+def pdf_pages(
+    data: bytes,
+    *,
+    gray: bool = True,
+    dpi: int = DPI,
+    pages: int = 20,
+    only: list[int] | None = None,
+) -> list[Page]:
+    raster = rasterize_pdf(
+        data, media=A4, dpi=dpi, gray=gray, max_bytes=LIMIT, max_pages=pages, pages=only
+    )
     return read_pages(raster)
 
 
@@ -203,3 +221,33 @@ def test_a_pdf_whose_raster_is_too_big_is_refused() -> None:
             max_bytes=1000,
             max_pages=20,
         )
+
+
+THREE_PAGES = black_pages_pdf((100, 100), (200, 300), (300, 400))
+
+
+def test_only_the_chosen_pages_of_a_pdf_are_rendered() -> None:
+    (page,) = pdf_pages(THREE_PAGES, only=[2])
+
+    width, height = page.ink_box()
+    assert abs(width - 200) <= 2
+    assert abs(height - 300) <= 2
+    assert page.field(452) == (1,)
+
+
+def test_several_chosen_pages_come_out_in_the_order_given() -> None:
+    first, second = pdf_pages(THREE_PAGES, only=[1, 3])
+
+    assert [abs(first.ink_box()[0] - 100) <= 2, abs(second.ink_box()[0] - 300) <= 2] == [True] * 2
+    assert first.field(452) == second.field(452) == (2,)
+
+
+def test_a_chosen_page_the_pdf_does_not_have_is_refused() -> None:
+    with pytest.raises(RasterError, match="3 pages; some chosen pages do not exist"):
+        pdf_pages(THREE_PAGES, only=[2, 4])
+
+
+def test_the_page_limit_counts_only_the_chosen_pages() -> None:
+    assert len(pdf_pages(THREE_PAGES, pages=2, only=[1, 3])) == 2
+    with pytest.raises(RasterError, match="3 pages; the limit is 2"):
+        pdf_pages(THREE_PAGES, pages=2, only=[1, 2, 3])

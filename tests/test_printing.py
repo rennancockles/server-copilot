@@ -1395,3 +1395,186 @@ async def test_a_pdf_is_still_told_to_convert_when_the_printer_takes_jpeg_only(
 
     with pytest.raises(ToolError, match="Convert the file to PDF or JPEG"):
         await mcp.call_tool("plan_print", {"file": file_argument("https://files/a.pdf")})
+
+
+# --- choosing pages ---------------------------------------------------------------------------
+
+
+def sized_pdf(pages: int) -> bytes:
+    """A PDF whose page ``n`` (from 1) is ``100 + 10 * n`` points wide, to tell pages apart."""
+    writer = PdfWriter()
+    for index in range(1, pages + 1):
+        writer.add_blank_page(width=100 + 10 * index, height=200)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def printed_pdf(request: httpx2.Request) -> PdfReader:
+    return PdfReader(io.BytesIO(request.content[request.content.index(b"%PDF-") :]))
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (None, [1, 2, 3, 4, 5]),
+        ("", [1, 2, 3, 4, 5]),
+        ("   ", [1, 2, 3, 4, 5]),
+        ("1-5", [1, 2, 3, 4, 5]),
+        ("1", [1]),
+        ("2-3", [2, 3]),
+        ("1-3,5", [1, 2, 3, 5]),
+        (" 2 - 3 , 5 ", [2, 3, 5]),
+        ("3,1", [1, 3]),
+        ("1,1,2", [1, 2]),
+        ("2-4,3-5", [2, 3, 4, 5]),
+    ],
+)
+def test_a_page_choice_is_read_as_ascending_pages_without_repeats(
+    spec: str | None, expected: list[int]
+) -> None:
+    assert printing.parse_pages(spec, 5) == expected
+
+
+@pytest.mark.parametrize(
+    ("spec", "total", "message"),
+    [
+        ("a", 5, "pages must look like"),
+        ("1-", 5, "pages must look like"),
+        ("-3", 5, "pages must look like"),
+        ("1,,2", 5, "pages must look like"),
+        ("1;2", 5, "pages must look like"),
+        ("1-2-3", 5, "pages must look like"),
+        ("1," * 80, 5, "pages must look like"),
+        ("0", 5, 'pages "0" is not a valid range'),
+        ("3-1", 5, 'pages "3-1" is not a valid range'),
+        ("6", 5, "The file has 5 pages, so page 6 does not exist"),
+        ("4-9", 5, "The file has 5 pages, so pages 6-9 do not exist"),
+        ("1,7,9-10", 5, "so pages 7-10 do not exist"),
+        ("2", 1, "The file has 1 page, so page 2 does not exist"),
+        ("1-99999999999999999999", 5, "pages 6-99999999999999999999 do not exist"),
+    ],
+)
+def test_a_page_choice_that_is_wrong_or_outside_the_file_is_refused(
+    spec: str, total: int, message: str
+) -> None:
+    with pytest.raises(PrintError, match=message):
+        printing.parse_pages(spec, total)
+
+
+@pytest.mark.parametrize(
+    ("selected", "total", "label"),
+    [
+        ([1, 2, 3], 3, "3 pages"),
+        ([1], 1, "1 page"),
+        ([2], 5, "page 2 of 5"),
+        ([2, 3], 5, "pages 2-3 of 5"),
+        ([1, 3, 4], 5, "pages 1, 3-4 of 5"),
+        ([1, 2, 4, 6, 7, 8], 9, "pages 1-2, 4, 6-8 of 9"),
+    ],
+)
+def test_the_pages_are_named_in_the_plan(selected: list[int], total: int, label: str) -> None:
+    assert printing._page_label(selected, total) == label
+
+
+async def test_only_the_chosen_pages_of_a_pdf_are_printed(printer: FakePrinter) -> None:
+    mcp = make_server(printer, files={"https://files/a.pdf": sized_pdf(5)})
+
+    plan, _ = await plan_and_print(
+        mcp, {"file": file_argument("https://files/a.pdf"), "pages": "2-3"}
+    )
+
+    assert (plan["pages"], plan["page_numbers"], plan["document_pages"]) == (2, [2, 3], 5)
+    assert "pages 2-3 of 5" in plan["summary"]
+    sent = printed_pdf(printer.prints()[0])
+    assert [float(page.mediabox.width) for page in sent.pages] == [120.0, 130.0]
+
+
+async def test_a_single_page_can_be_asked_for(printer: FakePrinter) -> None:
+    mcp = make_server(printer, files={"https://files/a.pdf": sized_pdf(3)})
+
+    plan, _ = await plan_and_print(
+        mcp, {"file": file_argument("https://files/a.pdf"), "pages": "1"}
+    )
+
+    assert "page 1 of 3" in plan["summary"]
+    assert [float(p.mediabox.width) for p in printed_pdf(printer.prints()[0]).pages] == [110.0]
+
+
+async def test_choosing_every_page_sends_the_pdf_untouched(printer: FakePrinter) -> None:
+    document = sized_pdf(3)
+    mcp = make_server(printer, files={"https://files/a.pdf": document})
+
+    plan, _ = await plan_and_print(
+        mcp, {"file": file_argument("https://files/a.pdf"), "pages": "1-3"}
+    )
+
+    assert plan["page_numbers"] == [1, 2, 3]
+    assert "3 pages" in plan["summary"]
+    assert printer.prints()[0].content.endswith(document)
+
+
+async def test_the_page_limit_counts_the_chosen_pages_not_the_files(printer: FakePrinter) -> None:
+    mcp = make_server(printer, files={"https://files/a.pdf": sized_pdf(printing.MAX_PAGES + 5)})
+    arguments = {"file": file_argument("https://files/a.pdf")}
+
+    plan = await call(mcp, "plan_print", {**arguments, "pages": "2-3"})
+    assert plan["pages"] == 2
+    with pytest.raises(ToolError, match="The document has 25 pages; the limit is 20"):
+        await mcp.call_tool("plan_print", arguments)
+    with pytest.raises(ToolError, match="You chose 21 pages; the limit is 20"):
+        await mcp.call_tool("plan_print", {**arguments, "pages": "1-21"})
+
+
+async def test_a_page_the_pdf_does_not_have_is_refused_before_anything_is_printed(
+    printer: FakePrinter,
+) -> None:
+    mcp = make_server(printer, files={"https://files/a.pdf": sized_pdf(3)})
+
+    with pytest.raises(ToolError, match="The file has 3 pages, so pages 4-5 do not exist"):
+        await mcp.call_tool(
+            "plan_print", {"file": file_argument("https://files/a.pdf"), "pages": "2-5"}
+        )
+
+    assert printer.prints() == []
+
+
+async def test_a_photo_and_the_test_page_have_one_page(printer: FakePrinter) -> None:
+    mcp = make_server(printer, files={"https://files/p.jpg": JPEG})
+
+    plan = await call(
+        mcp, "plan_print", {"file": file_argument("https://files/p.jpg"), "pages": "1"}
+    )
+    assert plan["page_numbers"] == [1]
+    with pytest.raises(ToolError, match="The file has 1 page, so page 2 does not exist"):
+        await mcp.call_tool(
+            "plan_print", {"file": file_argument("https://files/p.jpg"), "pages": "2"}
+        )
+    with pytest.raises(ToolError, match="page 3 does not exist"):
+        await mcp.call_tool("plan_print", {"test_page": True, "pages": "3"})
+
+
+async def test_only_the_chosen_pages_are_rendered_for_a_raster_only_printer(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/a.pdf": sized_pdf(5)})
+
+    plan, _ = await plan_and_print(
+        mcp, {"file": file_argument("https://files/a.pdf"), "pages": "2,4-5"}
+    )
+
+    document, header = raster_header(printer.prints()[0])
+    assert plan["page_numbers"] == [2, 4, 5]
+    assert "pages 2, 4-5 of 5" in plan["summary"]
+    assert header["total"] == (3,)
+    assert len(read_pages(document)) == 3
+
+
+async def test_plan_print_declares_the_pages_argument(printer: FakePrinter) -> None:
+    tools = await make_server(printer).list_tools()
+
+    plan_print = next(tool for tool in tools if tool.name == "plan_print")
+
+    assert "pages" in plan_print.input_schema["properties"]
+    assert "pages" not in plan_print.input_schema.get("required", [])

@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
+from itertools import groupby
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -26,7 +27,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PyPdfError
 
 from server_copilot.ipp import (
@@ -60,6 +61,7 @@ logger = logging.getLogger("uvicorn.error.printing")
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_PAGES = 20
+MAX_PAGES_SPEC_LENGTH = 100
 MAX_COPIES = 5
 CODE_TTL_SECONDS = 300
 MAX_PENDING = 5
@@ -133,6 +135,7 @@ JOB_ATTRIBUTES = [
     "job-impressions-completed",
 ]
 
+_PAGES_SPEC = re.compile(r"[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*")
 _REASON_SUFFIX = re.compile(r"-(error|warning|report)$")
 REASON_HINTS = {
     "media-empty": "The printer is out of paper.",
@@ -203,6 +206,8 @@ class PrintPlan(BaseModel):
     document_format: str
     size_bytes: int
     pages: int
+    page_numbers: list[int]
+    document_pages: int
     copies: int
     color: bool
     paper: str | None
@@ -570,6 +575,62 @@ def count_pages(data: bytes, document_format: str) -> int:
         raise PrintError("The PDF could not be read; it will not be printed.") from exc
 
 
+def parse_pages(spec: str | None, total: int) -> list[int]:
+    """The page numbers to print: ascending, each once; every page when ``spec`` is empty."""
+    if spec is None or not spec.strip():
+        return list(range(1, total + 1))
+    text = "".join(spec.split())
+    if len(text) > MAX_PAGES_SPEC_LENGTH or not _PAGES_SPEC.fullmatch(text):
+        raise PrintError('pages must look like "1", "2-3" or "1-3,5" (the first page is 1).')
+    chosen: set[int] = set()
+    beyond: list[int] = []
+    for part in text.split(","):
+        first, _, last = part.partition("-")
+        start, end = int(first), int(last or first)
+        if start < 1 or end < start:
+            raise PrintError(
+                f'pages "{part}" is not a valid range: write it from the lower to the higher '
+                "page, and start at 1."
+            )
+        chosen.update(range(start, min(end, total) + 1))
+        if end > total:
+            beyond += [max(start, total + 1), end]
+    if beyond:
+        low, high = min(beyond), max(beyond)
+        missing = f"page {low} does" if low == high else f"pages {low}-{high} do"
+        raise PrintError(
+            f"The file has {total} page{'s' if total != 1 else ''}, so {missing} not exist."
+        )
+    return sorted(chosen)
+
+
+def _page_label(selected: list[int], total: int) -> str:
+    """'3 pages' for the whole file, 'pages 1, 3-4 of 5' for a choice."""
+    if len(selected) == total:
+        return f"{total} page{'s' if total != 1 else ''}"
+    runs = [list(run) for _, run in groupby(enumerate(selected), key=lambda p: p[1] - p[0])]
+    text = ", ".join(
+        str(run[0][1]) if len(run) == 1 else f"{run[0][1]}-{run[-1][1]}" for run in runs
+    )
+    return f"{'page' if len(selected) == 1 else 'pages'} {text} of {total}"
+
+
+def _cut_pdf(document: bytes, selected: list[int]) -> bytes:
+    """A PDF holding only the chosen pages (1-based, ascending)."""
+    try:
+        reader = PdfReader(io.BytesIO(document))
+        writer = PdfWriter()
+        for number in selected:
+            writer.add_page(reader.pages[number - 1])
+        out = io.BytesIO()
+        writer.write(out)
+    except (PyPdfError, ValueError, OSError, RecursionError, IndexError, KeyError) as exc:
+        raise PrintError(
+            "The PDF could not be cut to those pages; it will not be printed."
+        ) from exc
+    return out.getvalue()
+
+
 def build_test_page(printer: str | None, moment: datetime) -> bytes:
     """A one-page PDF: a title, the time, and a swatch per ink so a clogged nozzle shows."""
     lines = [
@@ -745,11 +806,11 @@ def _job_attributes(pending: PendingPrint) -> list[tuple[int, str, Any]]:
 
 
 def _summary(  # noqa: PLR0913, PLR0917
-    name: str, pages: int, copies: int, color: bool, media: str | None, landscape: bool
+    name: str, pages: str, copies: int, color: bool, media: str | None, landscape: bool
 ) -> str:
     parts = [
         f"{name!r}",
-        f"{pages} page{'s' if pages != 1 else ''}",
+        pages,
         f"{copies} cop{'ies' if copies != 1 else 'y'}",
         "color" if color else "black and white",
         f"paper {media}" if media else "the printer's default paper",
@@ -769,6 +830,7 @@ async def build_plan(  # noqa: PLR0913, PLR0917
     color: bool,
     paper: str | None,
     landscape: bool,
+    pages: str | None = None,
 ) -> PrintPlan:
     if (file is None) == (not test_page):
         raise PrintError("Give either a file or test_page=true, not both and not neither.")
@@ -778,13 +840,17 @@ async def build_plan(  # noqa: PLR0913, PLR0917
     document, name, document_format, media = await _load_document(
         file, attributes, fetch, now, media
     )
-    pages = await asyncio.to_thread(count_pages, document, document_format)
-    if pages > MAX_PAGES:
-        raise PrintError(f"The document has {pages} pages; the limit is {MAX_PAGES}.")
+    total = await asyncio.to_thread(count_pages, document, document_format)
+    selected = parse_pages(pages, total)
+    if len(selected) > MAX_PAGES:
+        what = "You chose" if pages and pages.strip() else "The document has"
+        raise PrintError(f"{what} {len(selected)} pages; the limit is {MAX_PAGES}.")
     document, document_format, media, converted = await _convert(
-        document, document_format, attributes, media, color
+        document, document_format, attributes, media, color, selected
     )
     _require_format(document_format, attributes)
+    if document_format == PDF and len(selected) < total:
+        document = await asyncio.to_thread(_cut_pdf, document, selected)
     if converted:
         warnings.append(
             "The printer takes only raster, so the file was converted to it and each page is "
@@ -797,8 +863,9 @@ async def build_plan(  # noqa: PLR0913, PLR0917
     if mode is None:
         warnings.append("The printer does not list that color mode; it will use its default.")
     model = _first(attributes, "printer-make-and-model") or "the printer"
+    label = _page_label(selected, total)
     summary = (
-        f"{_summary(name, pages, copies, color, media, landscape)}, on {model} ({client.host})"
+        f"{_summary(name, label, copies, color, media, landscape)}, on {model} ({client.host})"
     )
     pending = PendingPrint(
         printer_url=client.printer_uri,
@@ -820,7 +887,9 @@ async def build_plan(  # noqa: PLR0913, PLR0917
         file_name=name,
         document_format=document_format,
         size_bytes=len(document),
-        pages=pages,
+        pages=len(selected),
+        page_numbers=selected,
+        document_pages=total,
         copies=copies,
         color=color,
         paper=media,
@@ -942,16 +1011,25 @@ def register_print_tools(  # noqa: PLR0913, PLR0917
             ),
         ] = None,
         landscape: Annotated[bool, Field(description="Print sideways.")] = False,
+        pages: Annotated[
+            str | None,
+            Field(
+                description='Which pages of a PDF to print, such as "1", "2-3" or "1-3,5" (the '
+                "first page is 1). They print in ascending order, each once; use copies to "
+                "repeat. Omit to print the whole file. A page the file does not have is refused."
+            ),
+        ] = None,
     ) -> PrintPlan:
         """Step 1 of printing: check the file and the printer, and get a confirmation code.
 
         Nothing is printed. Give the printer's address (find it with discover_network_devices;
         the server checks that it really is a printer on the home network), and the file the user
         attached, or set test_page to print a built-in test page. The file must be a PDF or JPEG
-        of at most 10 MB and 20 pages, up to 5 copies. The server downloads it, checks it and
-        keeps it for five minutes. Show the user the `summary` (it names the printer) and
-        `warnings` and print only after they agree: pass the `confirmation_code` to
-        print_document. The code works once; to print again, plan again.
+        of at most 10 MB, up to 20 pages printed and 5 copies; to print only some pages of a
+        PDF, set `pages`. The server downloads it, checks it and keeps it for five minutes.
+        Show the user the `summary` (it names the printer and the pages) and `warnings` and print
+        only after they agree: pass the `confirmation_code` to print_document. The code works
+        once; to print again, plan again.
         """
         async with open_printer(printer) as (client, attributes):
             return await build_plan(
@@ -965,6 +1043,7 @@ def register_print_tools(  # noqa: PLR0913, PLR0917
                 color,
                 paper,
                 landscape,
+                pages,
             )
 
     @mcp.tool(
@@ -1047,12 +1126,13 @@ def _raster_settings(attributes: dict[str, list[Any]], color: bool = True) -> tu
     return min(resolutions, default=DEFAULT_RASTER_DPI), gray
 
 
-async def _convert(
+async def _convert(  # noqa: PLR0913, PLR0917
     document: bytes,
     document_format: str,
     attributes: dict[str, list[Any]],
     media: str | None,
     color: bool,
+    selected: list[int],
 ) -> tuple[bytes, str, str | None, bool]:
     """A PDF or JPEG as PWG raster pages when the printer takes only raster; else unchanged."""
     supported = attributes.get("document-format-supported", [])
@@ -1072,7 +1152,7 @@ async def _convert(
         "max_bytes": MAX_RASTER_BYTES,
     }
     if document_format == PDF:
-        convert = partial(rasterize_pdf, document, max_pages=MAX_PAGES, **common)
+        convert = partial(rasterize_pdf, document, pages=selected, max_pages=MAX_PAGES, **common)
     else:
         convert = partial(rasterize_photo, document, **common)
     try:

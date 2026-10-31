@@ -417,7 +417,7 @@ apart: unreachable, DNS, TLS handshake, changed certificate, `426` and "not an I
 Printing is in two steps, like Compose updates, so a stray request or an instruction hidden in a
 document cannot print anything on its own:
 
-1. `plan_print(printer, file?, test_page?, copies?, color?, paper?, landscape?)` downloads the attached file,
+1. `plan_print(printer, file?, test_page?, copies?, color?, paper?, landscape?, pages?)` downloads the attached file,
    checks it and the printer, and keeps it in memory. It prints nothing. It returns a `summary` (file,
    pages, copies, color, paper, orientation and the printer's model and address), `warnings` (low ink, no paper) and a **confirmation
    code**, valid for five minutes and good once. `test_page=true` plans a built-in page with a swatch
@@ -430,10 +430,21 @@ If `print_document` fails, the code is spent: ask for a new plan after looking a
 `get_printer_status`, so a lost reply can never print twice.
 
 Limits (in `server_copilot/printing.py`): PDF or JPEG only, judged by the file's bytes and by what the
-printer says it accepts or can be converted to (a PNG is refused), at most 10 MB, 20 pages and 5 copies; a
+printer says it accepts or can be converted to (a PNG is refused), at most 10 MB, 20 printed pages and 5 copies; a
 password-protected or unreadable PDF is refused. The paper size must be one the printer lists (`a4`,
 `letter`, or its own name such as `iso_a4_210x297mm`). `get_printer_status(printer)` needs no
 confirmation: it only reads the state, the ink and the queue.
+
+**Choosing pages.** `pages` picks which pages of a PDF to print: `"1"` for just the first page,
+`"2-3"` for the second and third, `"1-3,5"` for a mix (the first page is 1, spaces are ignored). Pages
+always print in ascending order and each once, as in a print dialog (`"3,1"` prints 1 then 3; use
+`copies` to repeat). A page the file does not have (`"2-5"` on a three-page PDF) is refused, naming
+the pages that do not exist, rather than printing something other than what was asked. The 20-page
+limit counts the pages chosen, so two pages of a 100-page PDF can be printed (the 10 MB limit is on the
+file). The plan says what will come out: `summary` reads "pages 2-3 of 5", `pages` is the count, and
+`page_numbers` and `document_pages` list the pages and the size of the file. A printer that takes PDF
+is sent a PDF cut to those pages; a raster-only printer has only those pages rendered. Choosing every
+page sends the file untouched. A photo or the test page has one page.
 
 **Printers that take only raster.** The Epson ET-2860 lists `application/octet-stream`,
 `image/pwg-raster` and `application/vnd.epson.escpr` as its formats: no PDF, no JPEG. When a printer
