@@ -396,8 +396,23 @@ before any request is sent), only port 631 is used, and the host must answer an 
 `Get-Printer-Attributes` as a printer that supports `Print-Job`. Anything else (a router, a NAS, a
 web server) is refused as "not a printer" and receives nothing but that one read-only question. A name
 is resolved once and the IP is what gets used, so it cannot point somewhere else afterwards. `printer`
-accepts `192.168.1.94`, `192.168.1.94:631` or a full `ipp://192.168.1.94/ipp/print`; without a path it
-tries `/ipp/print`, `/ipp` and `/`.
+accepts `192.168.1.94`, `192.168.1.94:631`, or a full `ipp://192.168.1.94/ipp/print` or
+`ipps://192.168.1.94/ipp/print`.
+
+**Encrypted IPP (IPPS).** Many printers, the Epson ET-2860 among them, answer plain IPP on port 631
+with `HTTP 426 Upgrade Required` and only talk TLS. Given a bare address, the server tries `ipps`
+first and falls back to `ipp`; an explicit `ipp://` or `ipps://` is used as written and never
+downgraded. Without a path it asks the LAN over mDNS (`_ipps._tcp` / `_ipp._tcp`, the `rp` TXT
+key) which path the printer advertises, then tries `/ipp/print`, `/ipp` and `/`. mDNS names such as
+`EPSON0DD6F6.local` are not resolved by the container; use the IP.
+
+A printer's TLS certificate is self-signed, so no certificate authority can vouch for it. TLS
+verification is **not** switched off: the server reads the certificate the printer presents once,
+then requires exactly that certificate (and its private key) on the connection that follows. The plan
+from `plan_print` keeps the certificate it saw and `print_document` only sends the job to a printer
+presenting the same one, so a different device that takes over the IP between the two steps is
+refused ("not the one that was trusted") instead of receiving the document. Failures are told
+apart: unreachable, DNS, TLS handshake, changed certificate, `426` and "not an IPP endpoint".
 
 Printing is in two steps, like Compose updates, so a stray request or an instruction hidden in a
 document cannot print anything on its own:

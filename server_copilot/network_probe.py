@@ -40,6 +40,7 @@ ARP_COMPLETE = 0x2
 ROUTE_GATEWAY = 0x2
 TYPE_A = 1
 TYPE_PTR = 12
+TYPE_TXT = 16
 TYPE_SRV = 33
 CLASS_IN = 1
 META_QUERY = "_services._dns-sd._udp.local"
@@ -246,6 +247,22 @@ class DnsRecord:
     ip: str | None = None
     target: str | None = None
     port: int | None = None
+    txt: dict[str, str] = field(default_factory=dict)
+
+
+def _parse_txt(data: bytes) -> dict[str, str]:
+    """The ``key=value`` strings of a TXT record; a string that runs past the record is dropped."""
+    entries: dict[str, str] = {}
+    position = 0
+    while position < len(data):
+        end = position + 1 + data[position]
+        if end > len(data):
+            break
+        key, _, value = data[position + 1 : end].decode("utf-8", "replace").partition("=")
+        if key:
+            entries.setdefault(key.lower(), value)
+        position = end
+    return entries
 
 
 def _label_end(data: bytes, position: int) -> tuple[bytes, int]:
@@ -298,6 +315,8 @@ def _record(data: bytes, offset: int) -> tuple[DnsRecord, int]:
     elif rtype == TYPE_SRV and length > SRV_FIXED.size:
         record.port = SRV_FIXED.unpack_from(data, start)[2]
         record.target = read_name(data, start + SRV_FIXED.size)[0]
+    elif rtype == TYPE_TXT:
+        record.txt = _parse_txt(data[start:end])
     return record, end
 
 
@@ -372,6 +391,64 @@ async def mdns_discover(
     names = [f"{kind}.local" for kind in MDNS_SERVICE_TYPES] + [META_QUERY]
     replies = await _query(local_ip, build_mdns_query(names), group, ttl=MDNS_TTL, wait=wait)
     return _resolve_mdns(replies)
+
+
+IPP_SERVICES = {"_ipps._tcp": "ipps", "_ipp._tcp": "ipp"}
+_RESOURCE_PATH = re.compile(r"^[A-Za-z0-9._~/-]{1,64}$")
+
+
+def _has_dot_segment(path: str) -> bool:
+    return any(segment in ("", ".", "..") for segment in path.strip("/").split("/"))
+
+
+def printer_endpoints(
+    replies: list[tuple[bytes, str]], printer_ip: str, port: int
+) -> list[tuple[str, str]]:
+    """The ``(scheme, path)`` pairs a printer advertises for IPP, ipps first.
+
+    Only answers sent by ``printer_ip`` itself, for a service on ``port``, count, and the path
+    (the ``rp`` TXT key) must be a plain resource path: another device on the LAN cannot steer
+    a request to anywhere else.
+    """
+    records = [
+        record
+        for data, source in replies
+        if source == printer_ip
+        for record in parse_dns_response(data)
+    ]
+    services = {r.name.lower(): r for r in records if r.rtype == TYPE_SRV}
+    texts = {r.name.lower(): r.txt for r in records if r.rtype == TYPE_TXT}
+    pointers = [
+        (r.name.lower().removesuffix(".local"), r.target.lower())
+        for r in records
+        if r.rtype == TYPE_PTR and r.target
+    ]
+    found: list[tuple[str, str]] = []
+    for service_type, scheme in IPP_SERVICES.items():
+        for kind, instance in pointers:
+            service = services.get(instance)
+            path = texts.get(instance, {}).get("rp", "")
+            if kind != service_type or service is None or service.port != port:
+                continue
+            if not _RESOURCE_PATH.match(path) or _has_dot_segment(path):
+                continue
+            endpoint = (scheme, "/" + path.lstrip("/"))
+            if endpoint not in found:
+                found.append(endpoint)
+    return found
+
+
+async def mdns_printer_endpoints(
+    local_ip: str,
+    printer_ip: str,
+    port: int,
+    group: tuple[str, int] = MDNS_GROUP,
+    wait: float = 1.5,
+) -> list[tuple[str, str]]:
+    """Ask the LAN for a printer's IPP service records and return what ``printer_ip`` advertises."""
+    names = [f"{kind}.local" for kind in IPP_SERVICES]
+    replies = await _query(local_ip, build_mdns_query(names), group, ttl=MDNS_TTL, wait=wait)
+    return printer_endpoints(replies, printer_ip, port)
 
 
 # --- SSDP / UPnP ----------------------------------------------------------------------------

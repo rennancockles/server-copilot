@@ -29,13 +29,27 @@ from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
 from server_copilot.ipp import (
+    IPP_PORT,
     TAG_ENUM,
     TAG_INTEGER,
     TAG_KEYWORD,
     IppClient,
+    IppEndpointError,
     IppError,
+    IppTlsError,
     IppUnreachableError,
+    IppUpgradeRequiredError,
     Operation,
+    fetch_peer_certificate,
+)
+from server_copilot.network_probe import mdns_printer_endpoints
+from server_copilot.network_scan import local_interfaces
+from server_copilot.raster import (
+    DEFAULT_MEDIA,
+    SGRAY_8,
+    SRGB_8,
+    build_test_page as build_raster_test_page,
+    media_points,
 )
 
 # Under uvicorn.error so these lines reach the container log: nothing else configures logging.
@@ -57,8 +71,12 @@ TEST_PAGE_NAME = "Server Copilot test page"
 PDF = "application/pdf"
 JPEG = "image/jpeg"
 PNG = "image/png"
+PWG = "image/pwg-raster"
 SIGNATURES = ((b"%PDF-", PDF), (b"\xff\xd8\xff", JPEG), (b"\x89PNG\r\n\x1a\n", PNG))
-FORMAT_NAMES = {PDF: "PDF", JPEG: "JPEG", PNG: "PNG"}
+FORMAT_NAMES = {PDF: "PDF", JPEG: "JPEG", PNG: "PNG", PWG: "PWG raster"}
+MIN_RASTER_DPI = 150
+DEFAULT_RASTER_DPI = 300
+DEFAULT_RASTER_MEDIA = DEFAULT_MEDIA
 
 PRINTER_STATES = {3: "idle", 4: "processing", 5: "stopped"}
 # job-state (RFC 8011) -> (state name, outcome)
@@ -74,13 +92,14 @@ JOB_STATES: dict[int, tuple[str, Outcome]] = {
 }
 FINISHED_OUTCOMES = frozenset({"completed", "failed"})
 LANDSCAPE = 4
-IPP_PORT = 631
+SCHEMES = ("ipps", "ipp")
 PROBE_PATHS = ("/ipp/print", "/ipp", "/")
 PROBE_ATTEMPTS_HINT = "discover_network_devices lists printers with port 631 open"
 PRINTER_HELP = (
     "The printer's address on the home network, such as 192.168.1.94, as found by "
     "discover_network_devices (a printer has port 631 open). The server checks that it answers "
-    "as a printer."
+    "as a printer, over encrypted IPP (ipps) when the printer requires it. A full "
+    "ipps://host/path or ipp://host/path is accepted too."
 )
 INK_NOTE = ["Ink levels are the printer's own estimate; a missing level means none is reported."]
 MEDIA_EXAMPLES = 12
@@ -98,6 +117,8 @@ PRINTER_ATTRIBUTES = [
     "print-color-mode-supported",
     "marker-names",
     "marker-levels",
+    "pwg-raster-document-resolution-supported",
+    "pwg-raster-document-type-supported",
 ]
 JOB_ATTRIBUTES = [
     "job-id",
@@ -215,6 +236,14 @@ class PendingPrint:
     landscape: bool
     summary: str
     expires: float
+    certificate: str | None = None
+
+
+@dataclass(frozen=True)
+class Address:
+    host: str
+    scheme: str | None
+    path: str | None
 
 
 def _now() -> float:
@@ -276,8 +305,8 @@ def _is_lan_address(address: str) -> bool:
     )
 
 
-def parse_address(value: str) -> tuple[str, list[str]]:
-    """Split what the caller gave (an IP, a name, or an ipp:// URL) into host and IPP paths."""
+def parse_address(value: str) -> Address:
+    """Split what the caller gave (an IP, a name, or an ipp:// or ipps:// URL) into its parts."""
     text = value.strip()
     if (
         not text
@@ -292,7 +321,7 @@ def parse_address(value: str) -> tuple[str, list[str]]:
     except ValueError as exc:
         raise PrintError("printer must be an IP address or name, optionally with :631.") from exc
     if (
-        parts.scheme != "ipp"
+        parts.scheme not in ("ipp", "ipps")
         or not parts.hostname
         or parts.username
         or parts.password
@@ -301,10 +330,12 @@ def parse_address(value: str) -> tuple[str, list[str]]:
         or port not in (None, IPP_PORT)
     ):
         raise PrintError(
-            f"printer must be an IP address or name on port {IPP_PORT} (ipp://host/path is fine)."
+            f"printer must be an IP address or name on port {IPP_PORT} "
+            "(ipp://host/path or ipps://host/path is fine)."
         )
-    paths = [parts.path] if parts.path not in ("", "/") else list(PROBE_PATHS)
-    return parts.hostname, paths
+    explicit = "://" in text
+    path = parts.path if parts.path not in ("", "/") else None
+    return Address(parts.hostname, parts.scheme if explicit else None, path)
 
 
 def _is_printer(attributes: dict[str, list[Any]]) -> bool:
@@ -312,46 +343,139 @@ def _is_printer(attributes: dict[str, list[Any]]) -> bool:
     return "printer-state" in attributes and (not operations or PRINT_JOB in operations)
 
 
+async def _discover_endpoints(ip: str) -> list[tuple[str, str]]:
+    """The IPP endpoints the printer advertises over mDNS; empty when it says nothing."""
+    try:
+        target = ipaddress.IPv4Address(ip)
+        local = next(
+            (
+                item.ip
+                for item in local_interfaces()
+                if target in ipaddress.IPv4Interface(f"{item.ip}/{item.netmask}").network
+            ),
+            None,
+        )
+        return await mdns_printer_endpoints(local, ip, IPP_PORT) if local else []
+    except (OSError, ValueError):
+        return []
+
+
+def _candidates(target: Address, advertised: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The (scheme, path) pairs to try: what the caller named, else advertised, else the usual."""
+    schemes = [target.scheme] if target.scheme else list(SCHEMES)
+    if target.path:
+        return [(scheme, target.path) for scheme in schemes]
+    usual = [(scheme, path) for scheme in schemes for path in PROBE_PATHS]
+    return list(dict.fromkeys([e for e in advertised if e[0] in schemes] + usual))
+
+
+def _refusal(ip: str, failures: list[IppError]) -> PrintError:
+    """Why no endpoint worked; encryption problems are named instead of 'not a printer'."""
+    tls = next((f for f in failures if isinstance(f, IppTlsError)), None)
+    upgrade = any(isinstance(f, IppUpgradeRequiredError) for f in failures)
+    answered = any(not isinstance(f, IppTlsError | IppUpgradeRequiredError) for f in failures)
+    if tls and not answered:
+        detail = "it only accepts encrypted IPP (ipps), but " if upgrade else ""
+        return PrintError(f"{ip}: {detail}{tls}")
+    if upgrade and not answered:
+        return PrintError(
+            f"{ip} only accepts encrypted IPP (HTTP 426 Upgrade Required); use "
+            f"ipps://{ip}/ instead of ipp://."
+        )
+    return PrintError(
+        f"{ip} did not answer as a printer (IPP on port {IPP_PORT}); it is not one, or it does not "
+        f"print over IPP. {PROBE_ATTEMPTS_HINT.capitalize()}."
+    )
+
+
+class _Prober:
+    """Tries the endpoints of one printer address, reading its TLS certificate at most once."""
+
+    def __init__(
+        self,
+        ip: str,
+        transport: httpx2.AsyncBaseTransport | None,
+        fetch_certificate: Callable[[str], str],
+    ) -> None:
+        self._ip = ip
+        self._shown = f"[{ip}]" if ":" in ip else ip
+        self._transport = transport
+        self._fetch_certificate = fetch_certificate
+        self._certificate: str | None = None
+
+    async def try_endpoint(
+        self, scheme: str, path: str
+    ) -> tuple[IppClient, dict[str, list[Any]]] | None:
+        """A client and the printer's attributes, or None when the host is not a printer."""
+        if scheme == "ipps" and self._certificate is None:
+            self._certificate = await asyncio.to_thread(self._fetch_certificate, self._ip)
+        client = IppClient(
+            f"{scheme}://{self._shown}:{IPP_PORT}{path}",
+            transport=self._transport,
+            trusted_certificate=self._certificate if scheme == "ipps" else None,
+        )
+        try:
+            attributes = await client.get_printer_attributes(PRINTER_ATTRIBUTES)
+        except IppError:
+            await client.aclose()
+            raise
+        if _is_printer(attributes):
+            return client, attributes
+        await client.aclose()
+        return None
+
+
 async def connect_printer(
     address: str,
     transport: httpx2.AsyncBaseTransport | None = None,
     resolve: Callable[[str], list[str]] = _resolve_host,
+    fetch_certificate: Callable[[str], str] = fetch_peer_certificate,
+    discover: Callable[[str], Awaitable[list[tuple[str, str]]]] = _discover_endpoints,
 ) -> tuple[IppClient, dict[str, list[Any]]]:
     """Check that the address is a printer on the LAN and return a client for it.
 
     The address comes from the caller, so it is never trusted: it must resolve only to private
     LAN addresses, and the host must answer IPP as a printer that takes Print-Job. The client
-    talks to the resolved IP, so a name cannot change its meaning afterwards.
+    talks to the resolved IP, so a name cannot change its meaning afterwards. Over ipps the
+    printer's own (self-signed) certificate is read once and then required on every connection,
+    so verification is never switched off.
     """
-    host, paths = parse_address(address)
+    target = parse_address(address)
     try:
-        addresses = await asyncio.to_thread(resolve, host)
+        addresses = await asyncio.to_thread(resolve, target.host)
     except OSError as exc:
+        local_hint = (
+            " Names ending in .local are mDNS names, which this server cannot resolve."
+            if target.host.lower().endswith(".local")
+            else ""
+        )
         raise PrintError(
-            f"{host!r} could not be resolved; give the printer's IP address "
-            f"({PROBE_ATTEMPTS_HINT})."
+            f"{target.host!r} could not be resolved; give the printer's IP address "
+            f"({PROBE_ATTEMPTS_HINT}).{local_hint}"
         ) from exc
     if not addresses or not all(_is_lan_address(a) for a in addresses):
         raise PrintError("The printer must be on the home network (a private address); refused.")
     ip = addresses[0].partition("%")[0]
-    shown = f"[{ip}]" if ":" in ip else ip
-    for path in paths:
-        client = IppClient(f"ipp://{shown}:{IPP_PORT}{path}", transport=transport)
-        try:
-            attributes = await client.get_printer_attributes(PRINTER_ATTRIBUTES)
-        except IppUnreachableError as exc:
-            await client.aclose()
-            raise PrintError(str(exc)) from exc
-        except IppError:
-            await client.aclose()
+    advertised = [] if target.path or ":" in ip else await discover(ip)
+    prober = _Prober(ip, transport, fetch_certificate)
+    failures: list[IppError] = []
+    skipped: set[str] = set()
+    for scheme, path in _candidates(target, advertised):
+        if scheme in skipped:
             continue
-        if _is_printer(attributes):
-            return client, attributes
-        await client.aclose()
-    raise PrintError(
-        f"{ip} did not answer as a printer (IPP on port {IPP_PORT}); it is not one, or it does not "
-        f"print over IPP. {PROBE_ATTEMPTS_HINT.capitalize()}."
-    )
+        try:
+            found = await prober.try_endpoint(scheme, path)
+        except IppUnreachableError as exc:
+            raise PrintError(str(exc)) from exc
+        except IppError as exc:
+            failures.append(exc)
+            if isinstance(exc, IppTlsError | IppUpgradeRequiredError):
+                skipped.add(scheme)
+            continue
+        if found:
+            return found
+        failures.append(IppEndpointError(f"{ip} answered IPP at {path}, but not as a printer."))
+    raise _refusal(ip, failures)
 
 
 # --- the file ---------------------------------------------------------------------------------
@@ -646,18 +770,14 @@ async def build_plan(  # noqa: PLR0913, PLR0917
         raise PrintError("Give either a file or test_page=true, not both and not neither.")
     now = _now()
     warnings = _require_ready(attributes)
-    document, name = await _load_document(file, attributes, fetch, now)
-    document_format = detect_format(document)
-    supported = attributes.get("document-format-supported", [])
-    if supported and document_format not in supported:
-        raise PrintError(
-            f"The printer does not take {FORMAT_NAMES[document_format]} directly "
-            f"(it takes: {', '.join(supported)}). Convert the file to PDF or JPEG."
-        )
+    media = pick_media(paper, attributes.get("media-supported", []))
+    document, name, document_format, media = await _load_document(
+        file, attributes, fetch, now, media
+    )
+    _require_format(document_format, attributes)
     pages = await asyncio.to_thread(count_pages, document, document_format)
     if pages > MAX_PAGES:
         raise PrintError(f"The document has {pages} pages; the limit is {MAX_PAGES}.")
-    media = pick_media(paper, attributes.get("media-supported", []))
     mode = _color_mode(color, attributes.get("print-color-mode-supported", []))
     if mode is None:
         warnings.append("The printer does not list that color mode; it will use its default.")
@@ -676,6 +796,7 @@ async def build_plan(  # noqa: PLR0913, PLR0917
         landscape=landscape,
         summary=summary,
         expires=0,
+        certificate=client.trusted_certificate,
     )
     code = pending_plans.add(pending, now)
     logger.info("print planned: %s", summary)
@@ -739,11 +860,13 @@ async def fetch_job(client: IppClient, job_id: int) -> PrintJobStatus:
 # --- the tools --------------------------------------------------------------------------------
 
 
-def register_print_tools(
+def register_print_tools(  # noqa: PLR0913, PLR0917
     mcp: MCPServer,
     fetch: Callable[[str], Awaitable[bytes]] = fetch_document,
     transport: httpx2.AsyncBaseTransport | None = None,
     resolve: Callable[[str], list[str]] = _resolve_host,
+    fetch_certificate: Callable[[str], str] = fetch_peer_certificate,
+    discover: Callable[[str], Awaitable[list[tuple[str, str]]]] = _discover_endpoints,
 ) -> None:
     pending_plans = PendingPrints()
 
@@ -751,7 +874,9 @@ def register_print_tools(
     async def open_printer(
         address: str,
     ) -> AsyncGenerator[tuple[IppClient, dict[str, list[Any]]]]:
-        client, attributes = await connect_printer(address, transport, resolve)
+        client, attributes = await connect_printer(
+            address, transport, resolve, fetch_certificate, discover
+        )
         try:
             yield client, attributes
         finally:
@@ -848,7 +973,9 @@ def register_print_tools(
         moment; follow it with get_print_job until `finished` is true.
         """
         plan = pending_plans.redeem(confirmation_code, _now())
-        async with IppClient(plan.printer_url, transport=transport) as client:
+        async with IppClient(
+            plan.printer_url, transport=transport, trusted_certificate=plan.certificate
+        ) as client:
             return await send_plan(client, plan)
 
     @mcp.tool(
@@ -883,16 +1010,69 @@ def _job_message(job: PrintJob) -> str:
     return messages[job.outcome]
 
 
+def _raster_media(requested: str | None, attributes: dict[str, list[Any]]) -> str:
+    """The paper the raster test page is drawn for: the one asked for, else what is loaded."""
+    candidates = [
+        requested,
+        *attributes.get("media-ready", []),
+        *attributes.get("media-supported", []),
+    ]
+    return next((m for m in candidates if m and media_points(m)), DEFAULT_RASTER_MEDIA)
+
+
+def _raster_settings(attributes: dict[str, list[Any]]) -> tuple[int, bool]:
+    """The resolution (dpi) and whether to send gray, from what the printer lists for raster."""
+    resolutions = [
+        x
+        for x, y in attributes.get("pwg-raster-document-resolution-supported", [])
+        if x == y and x >= MIN_RASTER_DPI
+    ]
+    types = attributes.get("pwg-raster-document-type-supported", [])
+    return min(resolutions, default=DEFAULT_RASTER_DPI), SGRAY_8 in types and SRGB_8 not in types
+
+
+def _test_page(
+    attributes: dict[str, list[Any]], now: float, media: str | None
+) -> tuple[bytes, str, str | None]:
+    """The test page, as PDF, or drawn as PWG raster for a printer that takes no PDF."""
+    supported = attributes.get("document-format-supported", [])
+    if supported and PDF not in supported and PWG in supported:
+        raster_media = _raster_media(media, attributes)
+        dpi, gray = _raster_settings(attributes)
+        return build_raster_test_page(raster_media, dpi, gray=gray), PWG, raster_media
+    model = _first(attributes, "printer-make-and-model")
+    return build_test_page(model, datetime.fromtimestamp(now, tz=UTC)), PDF, media
+
+
 async def _load_document(
     file: FileInput | None,
     attributes: dict[str, list[Any]],
     fetch: Callable[[str], Awaitable[bytes]],
     now: float,
-) -> tuple[bytes, str]:
+    media: str | None,
+) -> tuple[bytes, str, str, str | None]:
+    """The document, its name, its format and the paper it is meant for."""
     if file is None:
-        model = _first(attributes, "printer-make-and-model")
-        return build_test_page(model, datetime.fromtimestamp(now, tz=UTC)), TEST_PAGE_NAME
+        document, document_format, media = _test_page(attributes, now, media)
+        return document, TEST_PAGE_NAME, document_format, media
     document = await fetch(file.download_url)
     if not document:
         raise PrintError("The file is empty.")
-    return document, _clean_name(file.file_name, "document")
+    return document, _clean_name(file.file_name, "document"), detect_format(document), media
+
+
+def _require_format(document_format: str, attributes: dict[str, list[Any]]) -> None:
+    supported = attributes.get("document-format-supported", [])
+    if not supported or document_format in supported:
+        return
+    if PDF in supported or JPEG in supported:
+        advice = "Convert the file to PDF or JPEG."
+    else:
+        advice = (
+            "This server cannot convert documents into those formats yet, so only the "
+            "test page can be printed on this printer."
+        )
+    raise PrintError(
+        f"The printer does not take {FORMAT_NAMES[document_format]} directly "
+        f"(it takes: {', '.join(supported)}). {advice}"
+    )

@@ -18,6 +18,7 @@ from server_copilot.network_probe import (
     fetch_limited,
     fetch_samsung,
     mdns_discover,
+    mdns_printer_endpoints,
     open_ports,
     parse_arp_table,
     parse_default_gateway,
@@ -25,6 +26,7 @@ from server_copilot.network_probe import (
     parse_samsung_info,
     parse_ssdp_reply,
     parse_upnp_description,
+    printer_endpoints,
     read_name,
     reverse_dns,
     ssdp_discover,
@@ -723,3 +725,94 @@ async def test_reverse_dns_gives_up_after_its_time_limit(monkeypatch: pytest.Mon
     monkeypatch.setattr(socket, "getnameinfo", slow)
 
     assert await reverse_dns("192.168.1.50", 0.05) is None
+
+
+# --- a printer's advertised IPP endpoints -------------------------------------------------------
+
+
+def txt(*entries: str) -> bytes:
+    return b"".join(label(entry) for entry in entries)
+
+
+def epson_response(
+    *, ipps_path: str | None = "ipp/print", ipp_path: str | None = "ipp/print", port: int = 631
+) -> bytes:
+    records = []
+    for kind, path in (("_ipps", ipps_path), ("_ipp", ipp_path)):
+        instance = f"EPSON ET-2860.{kind}._tcp.local"
+        records += [
+            record(f"{kind}._tcp.local", 12, dns_name(instance)),
+            record(instance, 33, struct.pack("!3H", 0, 0, port) + dns_name("epson.local")),
+        ]
+        if path is not None:
+            records.append(record(instance, 16, txt("txtvers=1", f"rp={path}", "ty=EPSON")))
+    return response(*records)
+
+
+def test_a_txt_record_is_decoded_to_its_keys() -> None:
+    records = parse_dns_response(response(record("x.local", 16, txt("rp=ipp/print", "Flag", "=x"))))
+
+    assert records[0].txt == {"rp": "ipp/print", "flag": ""}
+
+
+def test_a_txt_string_that_runs_past_the_record_is_dropped() -> None:
+    records = parse_dns_response(response(record("x.local", 16, txt("rp=ok") + b"\x20ab")))
+
+    assert records[0].txt == {"rp": "ok"}
+
+
+def test_a_printer_advertises_ipps_first_then_ipp_with_the_path_from_its_txt_record() -> None:
+    replies = [(epson_response(ipps_path="ipp/print", ipp_path="legacy"), "192.168.1.94")]
+
+    assert printer_endpoints(replies, "192.168.1.94", 631) == [
+        ("ipps", "/ipp/print"),
+        ("ipp", "/legacy"),
+    ]
+
+
+def test_an_answer_from_another_device_is_ignored() -> None:
+    replies = [(epson_response(), "192.168.1.66")]
+
+    assert printer_endpoints(replies, "192.168.1.94", 631) == []
+
+
+def test_a_service_on_another_port_is_ignored() -> None:
+    replies = [(epson_response(port=8631), "192.168.1.94")]
+
+    assert printer_endpoints(replies, "192.168.1.94", 631) == []
+
+
+@pytest.mark.parametrize("path", ["", "../etc", "ipp/print?x=1", "a b", "http://evil/x", "x" * 80])
+def test_a_path_that_is_not_a_plain_resource_path_is_ignored(path: str) -> None:
+    replies = [(epson_response(ipps_path=path, ipp_path=None), "192.168.1.94")]
+
+    assert printer_endpoints(replies, "192.168.1.94", 631) == []
+
+
+def test_a_service_without_a_txt_record_is_ignored() -> None:
+    replies = [(epson_response(ipps_path=None, ipp_path=None), "192.168.1.94")]
+
+    assert printer_endpoints(replies, "192.168.1.94", 631) == []
+
+
+async def test_the_lookup_asks_for_the_ipp_services_and_returns_the_printers_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exchange = Exchange([(epson_response(ipp_path=None), "192.168.1.94")])
+    exchange.install(monkeypatch)
+
+    found = await mdns_printer_endpoints("192.168.1.2", "192.168.1.94", 631, wait=0.1)
+
+    assert found == [("ipps", "/ipp/print")]
+    query, group = exchange.sent[0]
+    assert group == ("224.0.0.251", 5353)
+    assert b"\x05_ipps\x04_tcp\x05local\x00" in query
+    assert b"\x04_ipp\x04_tcp\x05local\x00" in query
+
+
+async def test_the_lookup_finds_nothing_when_nobody_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Exchange([]).install(monkeypatch)
+
+    assert await mdns_printer_endpoints("192.168.1.2", "192.168.1.94", 631, wait=0.05) == []

@@ -1,6 +1,6 @@
 import io
 import struct
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +20,9 @@ from server_copilot.ipp import (
     TAG_ENUM,
     TAG_INTEGER,
     TAG_KEYWORD,
+    IppCertificateError,
+    IppTlsError,
+    IppUnreachableError,
     Operation,
     decode_response,
 )
@@ -107,6 +110,8 @@ class FakePrinter:
         self.print_status = 0
         self.jobs: dict[int, bytes] = {42: job_group(42, 9)}
         self.requests: list[httpx2.Request] = []
+        self.dpis: list[int] = []
+        self.raster_types: list[str] = []
 
     def printer_group(self) -> bytes:
         return (
@@ -127,7 +132,25 @@ class FakePrinter:
             + keywords("marker-names", ["black ink", "cyan ink"], 0x42)
             + integer("marker-levels", 80)
             + integer("", -1)
+            + self.raster_attributes()
         )
+
+    def raster_attributes(self) -> bytes:
+        resolutions = b"".join(
+            attribute(0x32, "pwg-raster-document-resolution-supported" if index == 0 else "", value)
+            for index, value in enumerate(struct.pack(">iib", dpi, dpi, 3) for dpi in self.dpis)
+        )
+        return resolutions + keywords("pwg-raster-document-type-supported", self.raster_types)
+
+    def epson_like(self) -> None:
+        """What the ET-2860 reports: no PDF or JPEG, only raster formats."""
+        self.formats = [
+            "application/octet-stream",
+            "image/pwg-raster",
+            "application/vnd.epson.escpr",
+        ]
+        self.dpis = [360, 720]
+        self.raster_types = ["srgb_8", "sgray_8"]
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:  # noqa: PLR0911
         self.requests.append(request)
@@ -189,14 +212,29 @@ def lan(host: str) -> list[str]:
     return [host]
 
 
+def no_tls(_: str) -> str:
+    raise IppTlsError("The printer did not complete a TLS handshake.")
+
+
+async def nothing_advertised(_: str) -> list[tuple[str, str]]:
+    return []
+
+
 def make_server(
     printer: FakePrinter | Callable[[httpx2.Request], httpx2.Response],
     files: dict[str, bytes] | None = None,
     resolve: Callable[[str], list[str]] = lan,
+    fetch_certificate: Callable[[str], str] = no_tls,
+    discover: Callable[[str], Awaitable[list[tuple[str, str]]]] = nothing_advertised,
 ) -> Bound:
     mcp = MCPServer("test")
     register_print_tools(
-        mcp, fetcher(files or {}), transport=httpx2.MockTransport(printer), resolve=resolve
+        mcp,
+        fetcher(files or {}),
+        transport=httpx2.MockTransport(printer),
+        resolve=resolve,
+        fetch_certificate=fetch_certificate,
+        discover=discover,
     )
     return Bound(mcp)
 
@@ -796,7 +834,7 @@ async def test_a_private_ipv6_printer_is_reached_by_its_bracketed_address(
         "",
         "   ",
         "http://192.168.1.94/ipp/print",
-        "ipps://192.168.1.94",
+        "ipps://192.168.1.94:8443",
         "192.168.1.94:8080",
         "ipp://user:secret@192.168.1.94",
         "ipp://192.168.1.94/ipp?x=1",
@@ -883,3 +921,350 @@ async def test_the_plan_names_the_printer_and_the_job_goes_to_it(printer: FakePr
     assert "get_print_job(printer='192.168.1.94', job_id=42)" in submitted["message"]
     assert [str(r.url) for r in printer.requests[before:]] == ["http://192.168.1.94:631/ipp/print"]
     assert len(printer.prints()) == 1
+
+
+# --- IPPS ------------------------------------------------------------------------------------
+
+PEM = "-----BEGIN CERTIFICATE-----\nEPSON\n-----END CERTIFICATE-----\n"
+
+
+def fake_certificate(seen: list[str] | None = None) -> Callable[[str], str]:
+    def fetch(host: str) -> str:
+        if seen is not None:
+            seen.append(host)
+        return PEM
+
+    return fetch
+
+
+def https_only(printer: FakePrinter) -> Callable[[httpx2.Request], httpx2.Response]:
+    """Like the Epson ET-2860: plain IPP gets 426 Upgrade Required, IPPS works."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.scheme == "http":
+            return httpx2.Response(426)
+        return printer(request)
+
+    return handler
+
+
+async def test_a_printer_that_demands_ipps_is_reached_over_tls_from_a_bare_ip(
+    printer: FakePrinter,
+) -> None:
+    hosts: list[str] = []
+    mcp = make_server(https_only(printer), fetch_certificate=fake_certificate(hosts))
+
+    status = await call(mcp, "get_printer_status", {})
+
+    assert status["model"] == "EPSON ET-2860 Series"
+    assert status["ready"] is True
+    assert hosts == ["192.168.1.94"]
+    assert {str(r.url) for r in printer.requests} == {"https://192.168.1.94:631/ipp/print"}
+
+
+async def test_ipps_is_tried_before_plain_ipp_and_the_certificate_is_read_once(
+    printer: FakePrinter,
+) -> None:
+    hosts: list[str] = []
+    mcp = make_server(
+        lambda request: httpx2.Response(404) if request.url.path != "/ipp" else printer(request),
+        fetch_certificate=fake_certificate(hosts),
+    )
+
+    await call(mcp, "get_printer_status", {})
+
+    assert hosts == ["192.168.1.94"]
+    assert printer.requests[0].url.scheme == "https"
+
+
+async def test_a_printer_without_tls_falls_back_to_plain_ipp(printer: FakePrinter) -> None:
+    mcp = make_server(printer)
+
+    await call(mcp, "get_printer_status", {})
+
+    assert {str(r.url) for r in printer.requests} == {"http://192.168.1.94:631/ipp/print"}
+
+
+async def test_an_ipps_address_is_accepted_and_never_downgraded_to_plain_ipp(
+    printer: FakePrinter,
+) -> None:
+    mcp = make_server(printer, fetch_certificate=no_tls)
+
+    with pytest.raises(ToolError, match="TLS handshake"):
+        await mcp.call_tool("get_printer_status", {"printer": "ipps://192.168.1.94/ipp/print"})
+
+    assert printer.requests == []
+
+
+async def test_plan_print_accepts_ipps_prepares_the_test_page_and_prints_nothing(
+    printer: FakePrinter,
+) -> None:
+    mcp = make_server(https_only(printer), fetch_certificate=fake_certificate())
+
+    plan = await call(
+        mcp, "plan_print", {"printer": "ipps://192.168.1.94:631/ipp/print", "test_page": True}
+    )
+
+    assert plan["address"] == "192.168.1.94"
+    assert plan["confirmation_code"]
+    assert printer.prints() == []
+    assert {str(r.url) for r in printer.requests} == {"https://192.168.1.94:631/ipp/print"}
+
+
+async def test_after_confirmation_the_job_is_sent_over_ipps_and_followed(
+    printer: FakePrinter,
+) -> None:
+    mcp = make_server(https_only(printer), fetch_certificate=fake_certificate())
+    plan = await call(mcp, "plan_print", {"printer": "ipps://192.168.1.94", "test_page": True})
+    before = len(printer.requests)
+
+    submitted = await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+    job = await call(
+        mcp,
+        "get_print_job",
+        {"printer": "ipps://192.168.1.94", "job_id": submitted["job"]["job_id"]},
+    )
+
+    assert [str(r.url) for r in printer.requests[before : before + 1]] == [
+        "https://192.168.1.94:631/ipp/print"
+    ]
+    assert len(printer.prints()) == 1
+    assert job["job"]["finished"] is True
+
+
+async def test_the_plan_pins_the_certificate_it_saw_and_the_print_uses_it(
+    monkeypatch: pytest.MonkeyPatch, printer: FakePrinter
+) -> None:
+    trusted: list[tuple[str, str | None]] = []
+    original = printing.IppClient
+
+    class Recording(original):  # type: ignore[valid-type, misc]
+        def __init__(self, url: str, **kwargs: Any) -> None:
+            trusted.append((url, kwargs.get("trusted_certificate")))
+            super().__init__(url, **kwargs)
+
+    monkeypatch.setattr(printing, "IppClient", Recording)
+    mcp = make_server(https_only(printer), fetch_certificate=fake_certificate())
+    plan = await call(mcp, "plan_print", {"test_page": True})
+
+    await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+
+    assert ("ipps://192.168.1.94:631/ipp/print", PEM) in trusted[-1:]
+    assert all(certificate is None for url, certificate in trusted if url.startswith("ipp:"))
+
+
+async def test_a_plain_ipp_address_for_an_ipps_only_printer_says_to_use_ipps(
+    printer: FakePrinter,
+) -> None:
+    mcp = make_server(https_only(printer), fetch_certificate=fake_certificate())
+
+    with pytest.raises(ToolError, match=r"encrypted IPP.*ipps://192.168.1.94"):
+        await mcp.call_tool("get_printer_status", {"printer": "ipp://192.168.1.94/ipp/print"})
+
+
+async def test_a_printer_that_demands_tls_but_fails_the_handshake_is_reported_as_such() -> None:
+    mcp = make_server(lambda _: httpx2.Response(426), fetch_certificate=no_tls)
+
+    with pytest.raises(ToolError, match=r"only accepts encrypted IPP.*TLS handshake"):
+        await mcp.call_tool("get_printer_status", {"printer": "192.168.1.94"})
+
+
+async def test_a_changed_certificate_stops_the_print() -> None:
+    def impostor(request: httpx2.Request) -> httpx2.Response:
+        if decode_response(request.content).status == Operation.GET_PRINTER_ATTRIBUTES:
+            return FakePrinter()(request)
+        raise IppCertificateError("The certificate of the printer is not the one that was trusted.")
+
+    mcp = make_server(impostor, fetch_certificate=fake_certificate())
+    plan = await call(mcp, "plan_print", {"printer": "ipps://192.168.1.94", "test_page": True})
+
+    with pytest.raises(ToolError, match="not the one that was trusted.*Nothing was confirmed"):
+        await mcp.call_tool("print_document", {"confirmation_code": plan["confirmation_code"]})
+
+
+async def test_an_unreachable_ipps_port_is_reported_as_unreachable() -> None:
+    def unreachable(_: str) -> str:
+        raise IppUnreachableError("Cannot reach the printer at 192.168.1.94:631: refused.")
+
+    mcp = make_server(FakePrinter(), fetch_certificate=unreachable)
+
+    with pytest.raises(ToolError, match="Cannot reach the printer"):
+        await mcp.call_tool("get_printer_status", {"printer": "192.168.1.94"})
+
+
+async def test_the_path_the_printer_advertises_is_tried_first(printer: FakePrinter) -> None:
+    asked: list[str] = []
+
+    async def advertised(ip: str) -> list[tuple[str, str]]:
+        asked.append(ip)
+        return [("ipps", "/ipp/epson"), ("ipp", "/legacy")]
+
+    seen: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(str(request.url))
+        return printer(request) if request.url.path == "/ipp/epson" else httpx2.Response(404)
+
+    mcp = make_server(handler, fetch_certificate=fake_certificate(), discover=advertised)
+
+    await call(mcp, "get_printer_status", {})
+
+    assert asked == ["192.168.1.94"]
+    assert set(seen) == {"https://192.168.1.94:631/ipp/epson"}
+
+
+async def test_a_path_given_by_the_caller_skips_the_mdns_lookup(printer: FakePrinter) -> None:
+    async def advertised(_: str) -> list[tuple[str, str]]:
+        raise AssertionError("mDNS must not be asked when the path is known")
+
+    mcp = make_server(printer, discover=advertised)
+
+    await call(mcp, "get_printer_status", {"printer": "ipp://192.168.1.94/ipp/print"})
+
+
+async def test_a_wrong_path_is_not_enough_to_call_a_host_unreachable() -> None:
+    mcp = make_server(lambda _: httpx2.Response(404), fetch_certificate=fake_certificate())
+
+    with pytest.raises(ToolError, match="did not answer as a printer"):
+        await mcp.call_tool("get_printer_status", {"printer": "192.168.1.94"})
+
+
+async def test_an_mdns_name_that_does_not_resolve_explains_why() -> None:
+    def broken(_: str) -> list[str]:
+        raise OSError("no such host")
+
+    mcp = make_server(FakePrinter(), resolve=broken)
+
+    with pytest.raises(ToolError, match=r"could not be resolved.*\.local.*mDNS"):
+        await mcp.call_tool("get_printer_status", {"printer": "EPSON0DD6F6.local"})
+
+
+@pytest.mark.parametrize(
+    ("address", "host", "scheme", "path"),
+    [
+        ("192.168.1.94", "192.168.1.94", None, None),
+        ("192.168.1.94:631", "192.168.1.94", None, None),
+        ("ipps://192.168.1.94", "192.168.1.94", "ipps", None),
+        ("ipps://192.168.1.94:631/ipp/print", "192.168.1.94", "ipps", "/ipp/print"),
+        ("ipp://printer.lan/ipp", "printer.lan", "ipp", "/ipp"),
+    ],
+)
+def test_the_address_is_split_into_host_scheme_and_path(
+    address: str, host: str, scheme: str | None, path: str | None
+) -> None:
+    assert printing.parse_address(address) == printing.Address(host, scheme, path)
+
+
+# --- a printer that takes only raster ---------------------------------------------------------
+
+
+def raster_header(request: httpx2.Request) -> tuple[bytes, dict[str, tuple[int, ...]]]:
+    """The document that came after the IPP message, and a few header fields of its page."""
+    document = request.content[request.content.index(b"RaS2") :]
+    header = document[4:]
+    return document, {
+        "dpi": struct.unpack_from(">2I", header, 276),
+        "points": struct.unpack_from(">2I", header, 352),
+        "pixels": struct.unpack_from(">2I", header, 372),
+        "depth": struct.unpack_from(">I", header, 388),
+    }
+
+
+async def test_a_printer_without_pdf_gets_the_test_page_drawn_as_pwg_raster(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    mcp = make_server(https_only(printer), fetch_certificate=fake_certificate())
+
+    plan = await call(mcp, "plan_print", {"printer": "ipps://192.168.1.94", "test_page": True})
+    submitted = await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+
+    assert plan["document_format"] == "image/pwg-raster"
+    assert plan["pages"] == 1
+    assert plan["paper"] == A4
+    assert f"paper {A4}" in plan["summary"]
+    (job,) = printer.prints()
+    operation = decode_response(job.content).group(OPERATION_GROUP)
+    assert operation["document-format"] == ["image/pwg-raster"]
+    document, header = raster_header(job)
+    assert header == {
+        "dpi": (360, 360),
+        "points": (595, 842),
+        "pixels": (2975, 4210),
+        "depth": (24,),
+    }
+    assert plan["size_bytes"] == len(document)
+    assert decode_response(job.content).group(JOB_GROUP)["media"] == [A4]
+    assert submitted["job"]["job_id"] == 42
+
+
+async def test_the_raster_page_uses_the_paper_asked_for(printer: FakePrinter) -> None:
+    printer.epson_like()
+    printer.media = [A4, "na_letter_8.5x11in"]
+    mcp = make_server(printer)
+
+    plan = await call(mcp, "plan_print", {"test_page": True, "paper": "letter"})
+    await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+
+    _, header = raster_header(printer.prints()[0])
+    assert plan["paper"] == "na_letter_8.5x11in"
+    assert header["points"] == (612, 792)
+    assert header["pixels"] == (3060, 3960)
+
+
+async def test_the_raster_resolution_defaults_when_the_printer_lists_none(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    printer.dpis = []
+    mcp = make_server(printer)
+
+    plan = await call(mcp, "plan_print", {"test_page": True})
+    await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+
+    _, header = raster_header(printer.prints()[0])
+    assert header["dpi"] == (300, 300)
+
+
+async def test_a_printer_that_lists_only_gray_raster_gets_a_gray_page(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    printer.raster_types = ["sgray_8"]
+    mcp = make_server(printer)
+
+    plan = await call(mcp, "plan_print", {"test_page": True})
+    await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+
+    _, header = raster_header(printer.prints()[0])
+    assert header["depth"] == (8,)
+
+
+async def test_a_printer_that_takes_pdf_still_gets_the_pdf_test_page(printer: FakePrinter) -> None:
+    mcp = make_server(printer)
+
+    plan = await call(mcp, "plan_print", {"test_page": True})
+
+    assert plan["document_format"] == "application/pdf"
+
+
+async def test_a_pdf_file_is_refused_on_a_printer_that_takes_only_raster(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/a.pdf": pdf()})
+
+    with pytest.raises(ToolError, match=r"does not take PDF.*only the test page"):
+        await mcp.call_tool("plan_print", {"file": file_argument("https://files/a.pdf")})
+
+    assert printer.prints() == []
+
+
+async def test_a_pdf_is_still_told_to_convert_when_the_printer_takes_jpeg_only(
+    printer: FakePrinter,
+) -> None:
+    printer.formats = ["image/jpeg"]
+    mcp = make_server(printer, files={"https://files/a.pdf": pdf()})
+
+    with pytest.raises(ToolError, match="Convert the file to PDF or JPEG"):
+        await mcp.call_tool("plan_print", {"file": file_argument("https://files/a.pdf")})

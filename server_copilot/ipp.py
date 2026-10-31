@@ -5,6 +5,8 @@ Only what the printing tools use is implemented: requests carry integers, enums,
 and mime types; responses are decoded to plain Python values (collections are skipped).
 """
 
+import socket
+import ssl
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -13,6 +15,8 @@ from urllib.parse import urlsplit
 
 import httpx2
 
+IPP_PORT = 631
+HTTP_UPGRADE_REQUIRED = 426
 IPP_VERSION = (2, 0)
 HEADER_SIZE = 8
 INT_SIZE = 4
@@ -30,6 +34,10 @@ PRINTER_GROUP = 0x04
 TAG_INTEGER = 0x21
 TAG_BOOLEAN = 0x22
 TAG_ENUM = 0x23
+TAG_RESOLUTION = 0x32
+RESOLUTION_SIZE = 9
+RESOLUTION_DPCM = 4
+CM_PER_INCH = 2.54
 TAG_NAME = 0x42
 TAG_KEYWORD = 0x44
 TAG_URI = 0x45
@@ -85,6 +93,22 @@ class IppUnreachableError(IppError):
     """Nothing answered at the address: wrong host, powered off, or the connection timed out."""
 
 
+class IppUpgradeRequiredError(IppError):
+    """The printer answered HTTP 426: it only speaks IPP over TLS (ipps://)."""
+
+
+class IppTlsError(IppError):
+    """The TLS handshake failed: the address does not speak TLS, or refused the connection."""
+
+
+class IppCertificateError(IppTlsError):
+    """The printer's certificate is not the one that was trusted."""
+
+
+class IppEndpointError(IppError):
+    """The printer answered over HTTP, but not with IPP at this path."""
+
+
 @dataclass
 class IppResponse:
     status: int
@@ -98,22 +122,79 @@ class IppResponse:
 
 
 def printer_http_url(printer_url: str) -> str:
-    """The HTTP address an ``ipp://host[:port]/path`` printer URI is spoken to on."""
+    """The HTTP(S) address an ``ipp[s]://host[:port]/path`` printer URI is spoken to on."""
     parts = urlsplit(printer_url.strip())
-    if parts.scheme not in ("ipp", "http") or not parts.hostname:
+    if parts.scheme not in ("ipp", "ipps", "http", "https") or not parts.hostname:
         raise ValueError(
             f"Invalid printer URL {printer_url!r}; expected ipp://host:631/ipp/print "
-            "(ipps:// is not supported)."
+            "or ipps://host:631/ipp/print."
         )
-    port = parts.port or 631
+    port = parts.port or IPP_PORT
     path = parts.path or "/"
     host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
-    return f"http://{host}:{port}{path}"
+    scheme = "https" if parts.scheme in ("ipps", "https") else "http"
+    return f"{scheme}://{host}:{port}{path}"
 
 
 def printer_uri(printer_url: str) -> str:
-    """The ``printer-uri`` operation attribute: the same address with the ipp scheme."""
+    """The ``printer-uri`` operation attribute: the same address with the ipp or ipps scheme."""
     return "ipp" + printer_http_url(printer_url).removeprefix("http")
+
+
+def pinned_ssl_context(certificate_pem: str) -> ssl.SSLContext:
+    """A TLS context that accepts only the printer certificate given, and nothing else.
+
+    A printer's certificate is self-signed, so no CA vouches for it. Trusting that one certificate
+    as its own anchor still checks the handshake (the peer must hold its key) without switching
+    verification off. The host name is not checked: the printer is addressed by IP.
+    """
+    context = ssl.create_default_context(cadata=certificate_pem)
+    context.check_hostname = False
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    return context
+
+
+def fetch_peer_certificate(
+    host: str, port: int = IPP_PORT, timeout: float = CONNECT_TIMEOUT
+) -> str:
+    """The PEM certificate a printer presents on its TLS port (blocking).
+
+    Used once to learn which certificate to trust. The connection that follows only succeeds with
+    that same certificate, so a swap in between fails instead of going unnoticed.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with (
+            socket.create_connection((host, port), timeout=timeout) as raw,
+            context.wrap_socket(raw, server_hostname=host) as tls,
+        ):
+            der = tls.getpeercert(binary_form=True)
+    except ssl.SSLError as exc:
+        raise IppTlsError(
+            f"The printer at {host} did not complete a TLS handshake ({exc.reason or exc})."
+        ) from exc
+    except OSError as exc:
+        raise IppUnreachableError(
+            f"Cannot reach the printer at {host}:{port}: {exc}. Check that it is on, on the "
+            "network, and that the address has not changed."
+        ) from exc
+    if not der:
+        raise IppTlsError(f"The printer at {host} presented no TLS certificate.")
+    return ssl.DER_cert_to_PEM_cert(der)
+
+
+def _tls_error(exc: BaseException) -> ssl.SSLError | None:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ssl.SSLError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _attribute(tag: int, name: str, value: bytes) -> bytes:
@@ -156,6 +237,11 @@ def encode_request(
 
 
 def _decode_value(tag: int, raw: bytes) -> Any:
+    if tag == TAG_RESOLUTION and len(raw) == RESOLUTION_SIZE:
+        cross_feed, feed, units = struct.unpack(">iib", raw)
+        if units == RESOLUTION_DPCM:
+            return round(cross_feed * CM_PER_INCH), round(feed * CM_PER_INCH)
+        return cross_feed, feed
     if tag in (TAG_INTEGER, TAG_ENUM) and len(raw) == INT_SIZE:
         return struct.unpack(">i", raw)[0]
     if tag == TAG_BOOLEAN and len(raw) == 1:
@@ -217,15 +303,22 @@ class IppClient:
         *,
         timeout: float = DEFAULT_TIMEOUT,
         transport: httpx2.AsyncBaseTransport | None = None,
+        trusted_certificate: str | None = None,
     ) -> None:
         self.http_url = printer_http_url(printer_url)
         self.printer_uri = printer_uri(printer_url)
         self.host = urlsplit(self.http_url).hostname or ""
+        self.secure = self.http_url.startswith("https:")
+        self.trusted_certificate = trusted_certificate
         self._request_id = 0
+        verify: ssl.SSLContext | bool = True
+        if self.secure and trusted_certificate and transport is None:
+            verify = pinned_ssl_context(trusted_certificate)
         self._client = httpx2.AsyncClient(
             timeout=httpx2.Timeout(timeout, connect=CONNECT_TIMEOUT),
             transport=transport,
             trust_env=False,
+            verify=verify,
         )
 
     async def __aenter__(self) -> Self:
@@ -258,15 +351,37 @@ class IppClient:
                 f"Timed out talking to the printer at {self.http_url}."
             ) from exc
         except httpx2.TransportError as exc:
-            raise IppUnreachableError(
-                f"Cannot reach the printer at {self.http_url}: {exc}. Check that it is on, on "
-                "the network, and that the address has not changed."
-            ) from exc
+            raise self._transport_error(exc) from exc
+        if response.status_code == HTTP_UPGRADE_REQUIRED:
+            raise IppUpgradeRequiredError(
+                f"The printer at {self.http_url} answered HTTP 426 Upgrade Required: it only "
+                "accepts encrypted IPP (ipps://)."
+            )
         if not response.is_success:
-            raise IppError(f"The printer answered HTTP {response.status_code} at {self.http_url}.")
+            raise IppEndpointError(
+                f"The printer answered HTTP {response.status_code} at {self.http_url}; "
+                "that path may not be its IPP endpoint."
+            )
         if len(response.content) > MAX_RESPONSE_BYTES:
             raise IppError("The printer sent back an unexpectedly large response.")
         return decode_response(response.content)
+
+    def _transport_error(self, exc: httpx2.TransportError) -> IppError:
+        tls = _tls_error(exc)
+        if isinstance(tls, ssl.SSLCertVerificationError):
+            return IppCertificateError(
+                f"The certificate of the printer at {self.http_url} is not the one that was "
+                "trusted (it changed, or it is not the same device)."
+            )
+        if tls is not None:
+            return IppTlsError(
+                f"The TLS connection to the printer at {self.http_url} failed "
+                f"({tls.reason or tls})."
+            )
+        return IppUnreachableError(
+            f"Cannot reach the printer at {self.http_url}: {exc}. Check that it is on, on "
+            "the network, and that the address has not changed."
+        )
 
     def _checked(self, response: IppResponse) -> IppResponse:
         if response.status >= STATUS_SUCCESS_LIMIT:

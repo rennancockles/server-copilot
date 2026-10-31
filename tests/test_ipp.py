@@ -15,7 +15,9 @@ from server_copilot.ipp import (
     TAG_NAME,
     TAG_URI,
     IppClient,
+    IppEndpointError,
     IppError,
+    IppUpgradeRequiredError,
     Operation,
     decode_response,
     encode_request,
@@ -54,7 +56,17 @@ def test_printer_urls_become_http_and_ipp_addresses() -> None:
     assert printer_uri("ipp://192.168.1.94/ipp/print") == "ipp://192.168.1.94:631/ipp/print"
 
 
-@pytest.mark.parametrize("url", ["", "192.168.1.94", "ipps://p/ipp", "ftp://p/x", "ipp://"])
+def test_ipps_printer_urls_are_spoken_to_over_https_and_keep_the_ipps_uri() -> None:
+    assert (
+        printer_http_url("ipps://192.168.1.94:631/ipp/print")
+        == "https://192.168.1.94:631/ipp/print"
+    )
+    assert printer_http_url("ipps://[fd00::94]/ipp") == "https://[fd00::94]:631/ipp"
+    assert printer_uri("ipps://192.168.1.94/ipp/print") == "ipps://192.168.1.94:631/ipp/print"
+    assert printer_uri("https://192.168.1.94/ipp") == "ipps://192.168.1.94:631/ipp"
+
+
+@pytest.mark.parametrize("url", ["", "192.168.1.94", "ftp://p/x", "ipp://", "ipps://"])
 def test_a_printer_url_that_is_not_ipp_is_refused(url: str) -> None:
     with pytest.raises(ValueError, match="Invalid printer URL"):
         printer_http_url(url)
@@ -137,6 +149,20 @@ def test_collections_are_skipped_without_losing_the_attributes_around_them() -> 
     assert group == {"media-ready": ["iso_a4_210x297mm"], "media-default": ["iso_a4_210x297mm"]}
 
 
+def test_resolutions_are_decoded_to_dpi_whatever_unit_the_printer_uses() -> None:
+    printer = (
+        attribute(
+            0x32, "pwg-raster-document-resolution-supported", struct.pack(">iib", 360, 360, 3)
+        )
+        + attribute(0x32, "", struct.pack(">iib", 100, 100, 4))
+        + attribute(0x32, "short", b"\x00\x00")
+    )
+
+    group = decode_response(response_bytes(0, (PRINTER_GROUP, printer))).group(PRINTER_GROUP)
+
+    assert group == {"pwg-raster-document-resolution-supported": [(360, 360), (254, 254)]}
+
+
 def test_several_job_groups_are_kept_apart() -> None:
     first = integer("job-id", 11) + integer("job-state", 9, TAG_ENUM)
     second = integer("job-id", 12) + integer("job-state", 5, TAG_ENUM)
@@ -203,6 +229,38 @@ async def test_an_ipp_error_status_is_explained() -> None:
 
     with pytest.raises(IppError, match=r"0x040a.*does not accept this document format"):
         await make_client(transport).get_printer_attributes([])
+
+
+async def test_http_426_means_the_printer_only_accepts_ipps() -> None:
+    client = make_client(httpx2.MockTransport(lambda _: httpx2.Response(426)))
+
+    with pytest.raises(IppUpgradeRequiredError, match=r"426 Upgrade Required.*ipps://"):
+        await client.get_printer_attributes([])
+
+
+async def test_a_wrong_path_is_an_endpoint_error() -> None:
+    client = make_client(httpx2.MockTransport(lambda _: httpx2.Response(404)))
+
+    with pytest.raises(IppEndpointError, match="HTTP 404.*not be its IPP endpoint"):
+        await client.get_printer_attributes([])
+
+
+async def test_an_ipps_client_posts_to_https_with_the_ipps_printer_uri() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200, content=response_bytes(0, (PRINTER_GROUP, integer("printer-state", 3, TAG_ENUM)))
+        )
+
+    client = IppClient("ipps://192.168.1.94:631/ipp/print", transport=httpx2.MockTransport(handler))
+    await client.get_printer_attributes(["printer-state"])
+    await client.aclose()
+
+    assert str(seen[0].url) == "https://192.168.1.94:631/ipp/print"
+    uri = decode_response(seen[0].content).group(OPERATION_GROUP)["printer-uri"]
+    assert uri == ["ipps://192.168.1.94:631/ipp/print"]
 
 
 @pytest.mark.parametrize(
