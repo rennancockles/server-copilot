@@ -430,10 +430,25 @@ If `print_document` fails, the code is spent: ask for a new plan after looking a
 `get_printer_status`, so a lost reply can never print twice.
 
 Limits (in `server_copilot/printing.py`): PDF or JPEG only, judged by the file's bytes and by what the
-printer says it accepts (a PNG is refused, not converted), at most 10 MB, 20 pages and 5 copies; a
+printer says it accepts or can be converted to (a PNG is refused), at most 10 MB, 20 pages and 5 copies; a
 password-protected or unreadable PDF is refused. The paper size must be one the printer lists (`a4`,
 `letter`, or its own name such as `iso_a4_210x297mm`). `get_printer_status(printer)` needs no
 confirmation: it only reads the state, the ink and the queue.
+
+**Printers that take only raster.** The Epson ET-2860 lists `application/octet-stream`,
+`image/pwg-raster` and `application/vnd.epson.escpr` as its formats: no PDF, no JPEG. When a printer
+lacks the file's format but takes PWG raster, `plan_print` renders the file itself
+(`server_copilot/rasterize.py`: pdfium for PDF, Pillow for JPEG) and keeps the finished raster in
+memory like any other plan, so a bad file fails before the confirmation and `print_document` only
+sends. Each page is drawn at the lowest resolution of at least 150 dpi that the printer lists
+(300 dpi if it lists none), in color or gray as it lists and as `color` asks, on the paper asked for
+or the paper loaded. A page larger than the paper is shrunk to fit, a smaller one is not enlarged, and
+a landscape page is turned to fill a portrait sheet; a photo is fitted inside a 5 mm margin. Because
+the pages are fitted this way, `landscape` is not sent for a converted file (the plan says so). The
+raster is capped at 64 MB, which a full-page color photo at 360 dpi can approach (a text PDF is far
+smaller); past it the plan is refused. The page size comes from the paper, never from the file, and a
+photo of more than 100 million pixels is refused before it is decoded. The built-in test page takes
+the same route, drawn directly as raster. Printers that take PDF or JPEG are sent the file untouched.
 
 How the file arrives: `plan_print` declares its `file` argument as a file parameter
 (`openai/fileParams`), so ChatGPT hands the server a temporary download link instead of the file's

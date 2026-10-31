@@ -22,6 +22,9 @@ HEADER_SIZE = 8
 INT_SIZE = 4
 FIRST_VALUE_TAG = 0x10
 DEFAULT_TIMEOUT = 15.0
+# A printer reads a document at the pace it prints it, so a large job can stall the upload (and
+# delay the reply) for as long as a page takes; the limit is per wait, not for the whole job.
+DOCUMENT_TIMEOUT = 300.0
 CONNECT_TIMEOUT = 5.0
 MAX_RESPONSE_BYTES = 1024 * 1024
 USER_NAME = "server-copilot"
@@ -314,8 +317,10 @@ class IppClient:
         verify: ssl.SSLContext | bool = True
         if self.secure and trusted_certificate and transport is None:
             verify = pinned_ssl_context(trusted_certificate)
+        self._timeout = httpx2.Timeout(timeout, connect=CONNECT_TIMEOUT)
+        self._document_timeout = httpx2.Timeout(DOCUMENT_TIMEOUT, connect=CONNECT_TIMEOUT)
         self._client = httpx2.AsyncClient(
-            timeout=httpx2.Timeout(timeout, connect=CONNECT_TIMEOUT),
+            timeout=self._timeout,
             transport=transport,
             trust_env=False,
             verify=verify,
@@ -345,6 +350,7 @@ class IppClient:
                 self.http_url,
                 content=payload + document,
                 headers={"Content-Type": "application/ipp"},
+                timeout=self._document_timeout if document else self._timeout,
             )
         except httpx2.TimeoutException as exc:
             raise IppUnreachableError(

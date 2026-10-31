@@ -1,7 +1,6 @@
-import struct
-
 import pytest
 
+from pwg_decoder import Page, read_pages
 from server_copilot import raster
 from server_copilot.raster import build_test_page, media_points
 
@@ -9,48 +8,7 @@ pytestmark = pytest.mark.unit
 
 A4 = "iso_a4_210x297mm"
 LETTER = "na_letter_8.5x11in"
-HEADER_SIZE = 1796
 WHITE = bytes((255, 255, 255))
-
-
-class Page:
-    """A PWG raster page read back the way a printer would, independent of the writer."""
-
-    def __init__(self, data: bytes) -> None:
-        assert data[:4] == b"RaS2"
-        self.header = data[4 : 4 + HEADER_SIZE]
-        self.width, self.height = self.field(372, 2)
-        self.bytes_per_pixel = self.field(388)[0] // 8
-        position = 4 + HEADER_SIZE
-        row_size = self.width * self.bytes_per_pixel
-        self.rows: list[bytes] = []
-        while len(self.rows) < self.height:
-            repeat = data[position] + 1
-            position += 1
-            line = bytearray()
-            while len(line) < row_size:
-                control = data[position]
-                position += 1
-                assert control != 128, "128 is reserved"
-                if control <= 127:
-                    line += data[position : position + self.bytes_per_pixel] * (control + 1)
-                    position += self.bytes_per_pixel
-                else:
-                    count = 257 - control
-                    line += data[position : position + count * self.bytes_per_pixel]
-                    position += count * self.bytes_per_pixel
-            assert len(line) == row_size
-            self.rows += [bytes(line)] * repeat
-        assert len(self.rows) == self.height
-        assert position == len(data)
-
-    def field(self, offset: int, count: int = 1) -> tuple[int, ...]:
-        return struct.unpack_from(f">{count}I", self.header, offset)
-
-    def pixels(self, row: int) -> set[bytes]:
-        size = self.bytes_per_pixel
-        data = self.rows[row]
-        return {data[i : i + size] for i in range(0, len(data), size)}
 
 
 def test_media_names_give_their_size_in_points() -> None:
@@ -155,3 +113,89 @@ def test_a_row_is_packed_into_repeats_and_literals_that_read_back_the_same(
             decoded += packed[position : position + count]
             position += count
     assert list(decoded) == pixels
+
+
+def unpack(packed: bytes, bytes_per_pixel: int) -> bytes:
+    decoded = bytearray()
+    position = 0
+    while position < len(packed):
+        control = packed[position]
+        position += 1
+        assert control != 128
+        if control <= 127:
+            decoded += packed[position : position + bytes_per_pixel] * (control + 1)
+            position += bytes_per_pixel
+        else:
+            size = (257 - control) * bytes_per_pixel
+            decoded += packed[position : position + size]
+            position += size
+    return bytes(decoded)
+
+
+def noise(count: int, seed: int) -> list[bytes]:
+    state = seed
+    out = []
+    for _ in range(count):
+        state = (state * 1103515245 + 12345) % 2**31
+        out.append(bytes(((state >> 8) & 255, (state >> 16) & 255, (state >> 4) & 255)))
+    return out
+
+
+@pytest.mark.parametrize(
+    "pixels",
+    [
+        [bytes((9, 9, 9))] * 1000,
+        noise(1000, 1),
+        noise(130, 2),
+        noise(1, 3),
+        [bytes((1, 2, 3))] * 128 + noise(3, 4) + [bytes((5, 6, 7))] * 129,
+        noise(40, 5) * 3,
+        [pixel for pixel in noise(60, 6) for _ in range(7)],
+    ],
+)
+def test_rgb_rows_are_packed_without_losing_a_pixel(pixels: list[bytes]) -> None:
+    row = b"".join(pixels)
+
+    assert unpack(raster._pack_row(row, 3), 3) == row
+
+
+def test_a_busy_row_is_not_much_bigger_than_its_pixels() -> None:
+    row = b"".join(noise(2975, 7))
+
+    assert len(raster._pack_row(row, 3)) < len(row) * 1.02
+
+
+def test_pages_with_equal_rows_are_sent_once_with_a_repeat_count() -> None:
+    width, height = raster.page_pixels(A4, 72)
+    white = bytes(width * 3 * [255])
+    black = bytes(width * 3 * [0])
+
+    data = raster.encode_pages(
+        [[white] * height, ([black] * 10) + [white] * (height - 10)],
+        total_pages=2,
+        media=A4,
+        dpi=72,
+        gray=False,
+    )
+
+    first, second = read_pages(data)
+    assert first.field(452) == second.field(452) == (2,)
+    assert first.pixels(0) == {WHITE}
+    assert second.pixels(9) == {bytes((0, 0, 0))}
+    assert second.pixels(10) == {WHITE}
+    assert len(data) < 2 * 1796 + 1000
+
+
+def test_a_page_with_rows_of_the_wrong_size_is_refused() -> None:
+    with pytest.raises(raster.RasterError, match="printer's size"):
+        raster.encode_pages([[b"\x00" * 7] * 842], total_pages=1, media=A4, dpi=72, gray=False)
+
+
+def test_a_raster_larger_than_the_limit_is_stopped_while_it_is_written() -> None:
+    width, height = raster.page_pixels(A4, 72)
+    varied = (b"".join(noise(width, row)) for row in range(height))
+
+    with pytest.raises(raster.RasterTooLargeError, match="larger than 1 MB"):
+        raster.encode_pages(
+            [varied], total_pages=1, media=A4, dpi=72, gray=False, max_bytes=1024 * 1024
+        )

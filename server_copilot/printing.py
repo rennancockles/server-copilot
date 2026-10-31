@@ -17,6 +17,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -48,9 +49,11 @@ from server_copilot.raster import (
     DEFAULT_MEDIA,
     SGRAY_8,
     SRGB_8,
+    RasterError,
     build_test_page as build_raster_test_page,
     media_points,
 )
+from server_copilot.rasterize import rasterize_pdf, rasterize_photo
 
 # Under uvicorn.error so these lines reach the container log: nothing else configures logging.
 logger = logging.getLogger("uvicorn.error.printing")
@@ -77,6 +80,7 @@ FORMAT_NAMES = {PDF: "PDF", JPEG: "JPEG", PNG: "PNG", PWG: "PWG raster"}
 MIN_RASTER_DPI = 150
 DEFAULT_RASTER_DPI = 300
 DEFAULT_RASTER_MEDIA = DEFAULT_MEDIA
+MAX_RASTER_BYTES = 64 * 1024 * 1024
 
 PRINTER_STATES = {3: "idle", 4: "processing", 5: "stopped"}
 # job-state (RFC 8011) -> (state name, outcome)
@@ -774,10 +778,21 @@ async def build_plan(  # noqa: PLR0913, PLR0917
     document, name, document_format, media = await _load_document(
         file, attributes, fetch, now, media
     )
-    _require_format(document_format, attributes)
     pages = await asyncio.to_thread(count_pages, document, document_format)
     if pages > MAX_PAGES:
         raise PrintError(f"The document has {pages} pages; the limit is {MAX_PAGES}.")
+    document, document_format, media, converted = await _convert(
+        document, document_format, attributes, media, color
+    )
+    _require_format(document_format, attributes)
+    if converted:
+        warnings.append(
+            "The printer takes only raster, so the file was converted to it and each page is "
+            "fitted to the paper; small differences from the original are possible."
+        )
+    if landscape and document_format == PWG:
+        warnings.append("Landscape is not sent to a raster printer; pages are turned to fit.")
+        landscape = False
     mode = _color_mode(color, attributes.get("print-color-mode-supported", []))
     if mode is None:
         warnings.append("The printer does not list that color mode; it will use its default.")
@@ -1020,7 +1035,7 @@ def _raster_media(requested: str | None, attributes: dict[str, list[Any]]) -> st
     return next((m for m in candidates if m and media_points(m)), DEFAULT_RASTER_MEDIA)
 
 
-def _raster_settings(attributes: dict[str, list[Any]]) -> tuple[int, bool]:
+def _raster_settings(attributes: dict[str, list[Any]], color: bool = True) -> tuple[int, bool]:
     """The resolution (dpi) and whether to send gray, from what the printer lists for raster."""
     resolutions = [
         x
@@ -1028,7 +1043,43 @@ def _raster_settings(attributes: dict[str, list[Any]]) -> tuple[int, bool]:
         if x == y and x >= MIN_RASTER_DPI
     ]
     types = attributes.get("pwg-raster-document-type-supported", [])
-    return min(resolutions, default=DEFAULT_RASTER_DPI), SGRAY_8 in types and SRGB_8 not in types
+    gray = SGRAY_8 in types and (not color or SRGB_8 not in types)
+    return min(resolutions, default=DEFAULT_RASTER_DPI), gray
+
+
+async def _convert(
+    document: bytes,
+    document_format: str,
+    attributes: dict[str, list[Any]],
+    media: str | None,
+    color: bool,
+) -> tuple[bytes, str, str | None, bool]:
+    """A PDF or JPEG as PWG raster pages when the printer takes only raster; else unchanged."""
+    supported = attributes.get("document-format-supported", [])
+    if (
+        not supported
+        or document_format in supported
+        or PWG not in supported
+        or document_format not in (PDF, JPEG)
+    ):
+        return document, document_format, media, False
+    raster_media = _raster_media(media, attributes)
+    dpi, gray = _raster_settings(attributes, color)
+    common: dict[str, Any] = {
+        "media": raster_media,
+        "dpi": dpi,
+        "gray": gray,
+        "max_bytes": MAX_RASTER_BYTES,
+    }
+    if document_format == PDF:
+        convert = partial(rasterize_pdf, document, max_pages=MAX_PAGES, **common)
+    else:
+        convert = partial(rasterize_photo, document, **common)
+    try:
+        raster = await asyncio.to_thread(convert)
+    except RasterError as exc:
+        raise PrintError(str(exc)) from exc
+    return raster, PWG, raster_media, True
 
 
 def _test_page(
@@ -1065,13 +1116,10 @@ def _require_format(document_format: str, attributes: dict[str, list[Any]]) -> N
     supported = attributes.get("document-format-supported", [])
     if not supported or document_format in supported:
         return
-    if PDF in supported or JPEG in supported:
+    if PDF in supported or JPEG in supported or PWG in supported:
         advice = "Convert the file to PDF or JPEG."
     else:
-        advice = (
-            "This server cannot convert documents into those formats yet, so only the "
-            "test page can be printed on this printer."
-        )
+        advice = "This server can send PDF, JPEG or PWG raster, and the printer takes none of them."
     raise PrintError(
         f"The printer does not take {FORMAT_NAMES[document_format]} directly "
         f"(it takes: {', '.join(supported)}). {advice}"

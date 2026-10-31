@@ -231,6 +231,25 @@ async def test_an_ipp_error_status_is_explained() -> None:
         await make_client(transport).get_printer_attributes([])
 
 
+async def test_a_document_upload_may_stall_far_longer_than_a_status_request() -> None:
+    timeouts: list[dict[str, float | None]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        timeouts.append(request.extensions["timeout"])
+        return httpx2.Response(200, content=response_bytes(0, (JOB_GROUP, integer("job-id", 1))))
+
+    client = make_client(httpx2.MockTransport(handler))
+    await client.get_printer_attributes([])
+    await client.print_job(
+        b"x", document_format="image/pwg-raster", job_name="a", job_attributes=[]
+    )
+
+    status, upload = timeouts
+    assert status["read"] == status["write"] == ipp.DEFAULT_TIMEOUT
+    assert upload["read"] == upload["write"] == ipp.DOCUMENT_TIMEOUT
+    assert upload["connect"] == status["connect"] == ipp.CONNECT_TIMEOUT
+
+
 async def test_http_426_means_the_printer_only_accepts_ipps() -> None:
     client = make_client(httpx2.MockTransport(lambda _: httpx2.Response(426)))
 

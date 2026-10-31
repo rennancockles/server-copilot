@@ -9,8 +9,10 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+from pwg_decoder import read_pages
 from server_copilot import printing
 from server_copilot.docker import DockerClient
 from server_copilot.ipp import (
@@ -1167,6 +1169,7 @@ def raster_header(request: httpx2.Request) -> tuple[bytes, dict[str, tuple[int, 
         "points": struct.unpack_from(">2I", header, 352),
         "pixels": struct.unpack_from(">2I", header, 372),
         "depth": struct.unpack_from(">I", header, 388),
+        "total": struct.unpack_from(">I", header, 452),
     }
 
 
@@ -1192,6 +1195,7 @@ async def test_a_printer_without_pdf_gets_the_test_page_drawn_as_pwg_raster(
         "points": (595, 842),
         "pixels": (2975, 4210),
         "depth": (24,),
+        "total": (1,),
     }
     assert plan["size_bytes"] == len(document)
     assert decode_response(job.content).group(JOB_GROUP)["media"] == [A4]
@@ -1248,16 +1252,139 @@ async def test_a_printer_that_takes_pdf_still_gets_the_pdf_test_page(printer: Fa
     assert plan["document_format"] == "application/pdf"
 
 
-async def test_a_pdf_file_is_refused_on_a_printer_that_takes_only_raster(
+def photo_jpeg(size: tuple[int, int] = (600, 400), *, noisy: bool = False) -> bytes:
+    out = io.BytesIO()
+    image = Image.effect_noise(size, 80).convert("RGB") if noisy else Image.new("RGB", size, "red")
+    image.save(out, "JPEG")
+    return out.getvalue()
+
+
+async def plan_and_print(mcp: Bound, arguments: dict[str, Any]) -> tuple[Any, Any]:
+    plan = await call(mcp, "plan_print", arguments)
+    submitted = await call(mcp, "print_document", {"confirmation_code": plan["confirmation_code"]})
+    return plan, submitted
+
+
+async def test_a_pdf_is_converted_for_a_printer_that_takes_only_raster(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/a.pdf": pdf(3)})
+
+    plan, _ = await plan_and_print(mcp, {"file": file_argument("https://files/a.pdf", "a.pdf")})
+
+    (job,) = printer.prints()
+    document, header = raster_header(job)
+    assert plan["document_format"] == "image/pwg-raster"
+    assert plan["pages"] == 3
+    assert plan["paper"] == A4
+    assert plan["size_bytes"] == len(document)
+    assert any("converted" in warning for warning in plan["warnings"])
+    assert decode_response(job.content).group(OPERATION_GROUP)["document-format"] == [
+        "image/pwg-raster"
+    ]
+    assert header["total"] == (3,)
+    assert header["dpi"] == (360, 360)
+    assert header["pixels"] == (2975, 4210)
+    assert len(read_pages(document)) == 3
+
+
+async def test_a_photo_is_converted_for_a_printer_that_takes_only_raster(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/p.jpg": photo_jpeg()})
+
+    plan, _ = await plan_and_print(mcp, {"file": file_argument("https://files/p.jpg", "photo.jpg")})
+
+    document, header = raster_header(printer.prints()[0])
+    assert plan["document_format"] == "image/pwg-raster"
+    assert plan["pages"] == 1
+    assert header["total"] == (1,)
+    (page,) = read_pages(document)
+    assert (page.width, page.height) == (2975, 4210)
+
+
+async def test_a_black_and_white_request_sends_a_gray_raster(printer: FakePrinter) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/a.pdf": pdf()})
+
+    await plan_and_print(mcp, {"file": file_argument("https://files/a.pdf"), "color": False})
+
+    _, header = raster_header(printer.prints()[0])
+    assert header["depth"] == (8,)
+
+
+async def test_landscape_is_not_sent_for_a_converted_file_and_the_plan_says_so(
     printer: FakePrinter,
 ) -> None:
     printer.epson_like()
     mcp = make_server(printer, files={"https://files/a.pdf": pdf()})
 
-    with pytest.raises(ToolError, match=r"does not take PDF.*only the test page"):
-        await mcp.call_tool("plan_print", {"file": file_argument("https://files/a.pdf")})
+    plan, _ = await plan_and_print(
+        mcp, {"file": file_argument("https://files/a.pdf"), "landscape": True}
+    )
+
+    (job,) = printer.prints()
+    assert "orientation-requested" not in decode_response(job.content).group(JOB_GROUP)
+    assert plan["landscape"] is False
+    assert any("Landscape" in warning for warning in plan["warnings"])
+
+
+async def test_the_paper_asked_for_is_used_for_a_converted_file(printer: FakePrinter) -> None:
+    printer.epson_like()
+    printer.media = [A4, "na_letter_8.5x11in"]
+    mcp = make_server(printer, files={"https://files/a.pdf": pdf()})
+
+    plan, _ = await plan_and_print(
+        mcp, {"file": file_argument("https://files/a.pdf"), "paper": "letter"}
+    )
+
+    _, header = raster_header(printer.prints()[0])
+    assert plan["paper"] == "na_letter_8.5x11in"
+    assert header["points"] == (612, 792)
+
+
+async def test_a_conversion_that_would_use_too_much_memory_is_refused_before_confirmation(
+    monkeypatch: pytest.MonkeyPatch, printer: FakePrinter
+) -> None:
+    printer.epson_like()
+    monkeypatch.setattr(printing, "MAX_RASTER_BYTES", 2 * 1024 * 1024)
+    mcp = make_server(printer, files={"https://files/p.jpg": photo_jpeg((900, 600), noisy=True)})
+
+    with pytest.raises(ToolError, match="larger than 2 MB"):
+        await mcp.call_tool("plan_print", {"file": file_argument("https://files/p.jpg")})
 
     assert printer.prints() == []
+
+
+async def test_a_photo_that_cannot_be_decoded_is_refused(printer: FakePrinter) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/p.jpg": JPEG})
+
+    with pytest.raises(ToolError, match="could not be read"):
+        await mcp.call_tool("plan_print", {"file": file_argument("https://files/p.jpg")})
+
+
+async def test_a_png_is_still_refused_on_a_printer_that_takes_only_raster(
+    printer: FakePrinter,
+) -> None:
+    printer.epson_like()
+    mcp = make_server(printer, files={"https://files/p.png": PNG})
+
+    with pytest.raises(ToolError, match=r"does not take PNG.*Convert the file to PDF or JPEG"):
+        await mcp.call_tool("plan_print", {"file": file_argument("https://files/p.png")})
+
+
+async def test_a_printer_that_takes_pdf_is_sent_the_pdf_untouched(printer: FakePrinter) -> None:
+    document = pdf()
+    mcp = make_server(printer, files={"https://files/a.pdf": document})
+
+    plan, _ = await plan_and_print(mcp, {"file": file_argument("https://files/a.pdf")})
+
+    assert plan["document_format"] == "application/pdf"
+    assert plan["size_bytes"] == len(document)
+    assert printer.prints()[0].content.endswith(document)
 
 
 async def test_a_pdf_is_still_told_to_convert_when_the_printer_takes_jpeg_only(
