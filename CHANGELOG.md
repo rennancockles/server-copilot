@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.17.0 (2026-10-31)
+
+### Bug Fixes
+
+- Print over IPPS with a pinned printer certificate and a raster test page
+  ([`ba88e1e`](https://github.com/rennancockles/server-copilot/commit/ba88e1e09c48c8d5fe40722d738c21cbaad4b81b))
+
+### Features
+
+- Choose which pages of a PDF to print with the pages argument
+  ([`f42f3f1`](https://github.com/rennancockles/server-copilot/commit/f42f3f196e3ab5e11621f8e90de71da1a0c86bd6))
+
+- Print PDF and JPEG on printers that take only PWG raster
+  ([`f23e933`](https://github.com/rennancockles/server-copilot/commit/f23e933686e56720280f692e2b4c0af992b6420d))
+
+
 ## v0.16.0 (2026-10-30)
 
 ### Features
